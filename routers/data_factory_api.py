@@ -9,6 +9,8 @@ from pydantic import BaseModel, Field
 
 # 导入现有的服务
 from services.resource_service import ResourceService
+# 导入新的服务
+from services.source_analysis_service import SourceAnalysisService
 
 # 设置日志
 logger = logging.getLogger(__name__)
@@ -21,9 +23,14 @@ class CrawlRequest(BaseModel):
     sourceType: str
     limit: Optional[int] = 100
 
-class DataSourceStatistics(BaseModel):
+class DataSourceStatisticsData(BaseModel):
     counts: Dict[str, int]
     totalCount: int
+
+class DataSourceStatistics(BaseModel):
+    code: int = 200
+    message: str = "success"
+    data: DataSourceStatisticsData
 
 class CrawlResult(BaseModel):
     title: str
@@ -54,17 +61,34 @@ crawling_tasks = {}
 async def get_source_statistics():
     """获取数据源统计信息"""
     try:
-        # 这里可以连接到实际的数据源统计服务
-        # 目前使用模拟数据
+        # 获取自动分析结果
+        analysis_result = await ResourceService.get_auto_analysis_result()
+        
+        # 初始化计数字典 - 动态创建，不预定义字段
+        counts = {}
+        
+        # 将分析结果映射到数据源类型
+        if analysis_result:
+            for item in analysis_result:
+                category = item.get("name", "").lower()
+                count = item.get("count", 0)
+                
+                # 直接使用分析结果中的类别名称
+                if category:
+                    counts[category] = count
+        
+        # 计算总数
+        total_count = sum(counts.values())
+        
+        result = {
+            "counts": counts,
+            "totalCount": total_count
+        }
+        
         return {
-            "counts": {
-                "academic": 117,
-                "report": 117,
-                "book": 117,
-                "policy": 117,
-                "standard": 117,
-            },
-            "totalCount": 585
+            "code": 200,
+            "message": "success",
+            "data": result
         }
     except Exception as e:
         logger.error(f"Error getting source statistics: {e}")
@@ -79,7 +103,11 @@ async def start_crawling(request: CrawlRequest, background_tasks: BackgroundTask
         # 检查是否已有相同类型的爬虫任务在运行
         for tid, task in crawling_tasks.items():
             if task.get("sourceType") == request.sourceType and task.get("status") == "running":
-                return {"task_id": tid, "status": "already_running", "message": "已有相同类型的爬虫任务在运行"}
+                return {
+                    "code": 200,
+                    "message": "success",
+                    "data": {"task_id": tid, "status": "already_running", "message": "已有相同类型的爬虫任务在运行"}
+                }
         
         # 创建新任务
         crawling_tasks[task_id] = {
@@ -90,11 +118,16 @@ async def start_crawling(request: CrawlRequest, background_tasks: BackgroundTask
             "results": []
         }
         
-        # 使用ResourceService的自动分析功能作为后台任务
-        # 这里复用了现有的自动分析功能，实际应用中可能需要创建专门的爬虫服务
-        background_tasks.add_task(ResourceService.auto_analyze_local_directories)
+        # 使用新的SourceAnalysisService分析指定类型的文件
+        background_tasks.add_task(SourceAnalysisService.analyze_source_by_type, 
+                                 request.sourceType, 
+                                 request.limit)
         
-        return {"task_id": task_id, "status": "started", "message": "爬取任务已启动"}
+        return {
+            "code": 200,
+            "message": "success",
+            "data": {"task_id": task_id, "status": "started", "message": "爬取任务已启动"}
+        }
     except Exception as e:
         logger.error(f"Error starting crawling: {e}")
         raise HTTPException(status_code=500, detail=str(e))
@@ -110,12 +143,16 @@ async def stop_crawling():
                 task["status"] = "stopped"
                 stopped_count += 1
         
-        return {"stopped_count": stopped_count, "message": f"已停止{stopped_count}个爬虫任务"}
+        return {
+            "code": 200,
+            "message": "success",
+            "data": {"stopped_count": stopped_count, "message": f"已停止{stopped_count}个爬虫任务"}
+        }
     except Exception as e:
         logger.error(f"Error stopping crawling: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
-@router.get("/collection/results", response_model=CrawlResultsResponse)
+@router.get("/collection/results")
 async def get_crawl_results(
     sourceType: str = Query(..., description="数据源类型"),
     page: int = Query(1, description="页码"),
@@ -123,47 +160,54 @@ async def get_crawl_results(
 ):
     """获取爬取结果"""
     try:
-        # 查找指定类型的最新爬虫任务
-        latest_task = None
-        latest_time = None
+        # 直接从SourceAnalysisService获取分析结果
+        analysis_results = await SourceAnalysisService.get_analysis_result(sourceType)
         
-        for task_id, task in crawling_tasks.items():
-            if task.get("sourceType") == sourceType:
-                task_time = task.get("startTime")
-                if latest_time is None or (task_time and task_time > latest_time):
-                    latest_task = task
-                    latest_time = task_time
+        # 如果没有结果，返回空列表
+        if not analysis_results or "result" not in analysis_results:
+            return {
+                "code": 200,
+                "message": "success",
+                "data": {"results": [], "total": 0}
+            }
         
-        if not latest_task:
-            # 如果没有找到任务，生成一些模拟数据
-            results = []
-            for i in range(20):
-                results.append({
-                    "title": f"{sourceType}样本数据 #{i+1}",
-                    "source": f"{sourceType.capitalize()} 数据源",
-                    "time": (datetime.now() - timedelta(minutes=i)).strftime("%H:%M:%S")
-                })
-        else:
-            # 使用任务中的结果
-            results = latest_task.get("results", [])
-            
-            # 如果结果为空，也生成一些模拟数据
-            if not results:
-                for i in range(20):
-                    results.append({
-                        "title": f"{sourceType}样本数据 #{i+1}",
-                        "source": f"{sourceType.capitalize()} 数据源",
-                        "time": (datetime.now() - timedelta(minutes=i)).strftime("%H:%M:%S")
-                    })
+        # 获取结果列表
+        result_list = analysis_results.get("result", [])
+        total = len(result_list)
         
-        # 分页处理
+        # 计算分页
         start_idx = (page - 1) * pageSize
         end_idx = start_idx + pageSize
-        paged_results = results[start_idx:end_idx]
+        paged_results = result_list[start_idx:end_idx]
+        
+        # 转换为前端需要的格式
+        formatted_results = []
+        for item in paged_results:
+            # 从文件夹中提取第一个文件作为标题
+            title = item.get("folder_name", "未知文件夹")
+            
+            # 使用文件夹路径作为来源
+            source = item.get("folder_path", "未知路径")
+            
+            # 获取文件列表
+            files = item.get("files", [])
+            file_count = item.get("file_count", 0)
+            
+            # 创建结果项
+            result_item = {
+                "title": title,
+                "source": source,
+                "time": datetime.now().isoformat(),
+                "fileCount": file_count,
+                "files": files
+            }
+            
+            formatted_results.append(result_item)
         
         return {
-            "results": paged_results,
-            "total": len(results)
+            "code": 200,
+            "message": "success",
+            "data": {"results": formatted_results, "total": total}
         }
     except Exception as e:
         logger.error(f"Error getting crawl results: {e}")
@@ -181,11 +225,17 @@ async def get_processing_statistics():
         total_folders = sum(item.get("count", 0) for item in analysis_result) if analysis_result else 0
         
         # 模拟数据处理统计
-        return {
+        result = {
             "validPapers": int(total_folders * 0.7),  # 假设70%是有效论文
             "formulas": int(total_folders * 0.3),     # 假设30%包含公式
             "trashData": int(total_folders * 0.1),    # 假设10%是废弃数据
             "processingRate": 0.85                    # 假设处理率为85%
+        }
+        
+        return {
+            "code": 200,
+            "message": "success",
+            "data": result
         }
     except Exception as e:
         logger.error(f"Error getting processing statistics: {e}")
@@ -216,8 +266,9 @@ async def get_valid_papers(
         paged_papers = papers[start_idx:end_idx]
         
         return {
-            "papers": paged_papers,
-            "total": len(papers)
+            "code": 200,
+            "message": "success",
+            "data": {"papers": paged_papers, "total": len(papers)}
         }
     except Exception as e:
         logger.error(f"Error getting valid papers: {e}")
@@ -247,8 +298,9 @@ async def get_formulas(
         paged_formulas = formulas[start_idx:end_idx]
         
         return {
-            "formulas": paged_formulas,
-            "total": len(formulas)
+            "code": 200,
+            "message": "success",
+            "data": {"formulas": paged_formulas, "total": len(formulas)}
         }
     except Exception as e:
         logger.error(f"Error getting formulas: {e}")
@@ -278,8 +330,9 @@ async def get_trash_data(
         paged_trash = trash_data[start_idx:end_idx]
         
         return {
-            "trash": paged_trash,
-            "total": len(trash_data)
+            "code": 200,
+            "message": "success",
+            "data": {"trash": paged_trash, "total": len(trash_data)}
         }
     except Exception as e:
         logger.error(f"Error getting trash data: {e}")
@@ -328,7 +381,11 @@ async def get_processing_trend(
             trend_data["formulas"].append(int(base * 0.4))
             trend_data["trashData"].append(int(base * 0.1))
         
-        return trend_data
+        return {
+            "code": 200,
+            "message": "success",
+            "data": trend_data
+        }
     except Exception as e:
         logger.error(f"Error getting processing trend: {e}")
         raise HTTPException(status_code=500, detail=str(e))
@@ -338,14 +395,18 @@ async def get_processing_trend(
 async def get_data_sources():
     """获取数据源列表"""
     try:
+        sources = [
+            {"id": "academic", "name": "学术论文", "count": 117},
+            {"id": "report", "name": "调查报告", "count": 117},
+            {"id": "book", "name": "专业书籍", "count": 117},
+            {"id": "policy", "name": "政策文件", "count": 117},
+            {"id": "standard", "name": "法规标准", "count": 117}
+        ]
+        
         return {
-            "sources": [
-                {"id": "academic", "name": "学术论文", "count": 117},
-                {"id": "report", "name": "调查报告", "count": 117},
-                {"id": "book", "name": "专业书籍", "count": 117},
-                {"id": "policy", "name": "政策文件", "count": 117},
-                {"id": "standard", "name": "法规标准", "count": 117}
-            ]
+            "code": 200,
+            "message": "success",
+            "data": {"sources": sources}
         }
     except Exception as e:
         logger.error(f"Error getting data sources: {e}")
@@ -355,3 +416,11 @@ async def get_data_sources():
 # 在主应用程序中使用:
 # from routers.data_factory_api import router as data_factory_router
 # app.include_router(data_factory_router, prefix="/api")
+
+
+
+
+
+
+
+
