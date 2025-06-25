@@ -9,6 +9,7 @@ import logging
 # 导入服务
 from services.hourly_stats_service import HourlyStatsService
 from services.alert_service import AlertService
+from services.database import Task, Alert
 
 # 配置日志
 logging.basicConfig(level=logging.INFO)
@@ -19,31 +20,23 @@ router = APIRouter(prefix="/analysis", tags=["数据分析仪表盘"])
 @router.get("/visit-statistics")
 async def get_visit_statistics():
     """
-    获取访问统计数据，用于饼图展示
-    返回不同来源的访问统计
+    获取访问统计数据（从数据库最新分析结果统计）
     """
     try:
-        # 从auto_analysis_cache.json读取数据
-        cache_path = os.path.join(os.path.dirname(os.path.dirname(__file__)), "cache", "auto_analysis_cache.json")
-        
-        if os.path.exists(cache_path):
-            try:
-                with open(cache_path, 'r', encoding='utf-8') as f:
-                    cache_data = json.load(f)
-                
-                # 转换数据格式为[{"name": "分类名", "value": 数量}]
-                visit_data = []
-                
-                if "result" in cache_data and isinstance(cache_data["result"], list):
-                    for category in cache_data["result"]:
-                        if "name" in category and "count" in category:
-                            visit_data.append({
-                                "name": category["name"],
-                                "value": category["count"]
-                            })
-            except Exception as e:
-                logger.error(f"Error reading cache file: {e}")
-        
+        visit_data = []
+        # 查找24小时内最新的自动分析任务
+        task = await Task.find_one(
+            Task.task_type == "auto_resource_analysis",
+            Task.status == "completed",
+            sort=[("end_time", -1)]
+        )
+        if task and task.result and "categories" in task.result:
+            for category in task.result["categories"]:
+                if "name" in category and "count" in category:
+                    visit_data.append({
+                        "name": category["name"],
+                        "value": category["count"]
+                    })
         return {
             "code": 200,
             "message": "获取访问统计数据成功",
@@ -56,13 +49,33 @@ async def get_visit_statistics():
 @router.get("/hourly-data-volume")
 async def get_hourly_data_volume():
     """
-    获取每小时数据提取量
+    获取每小时数据提取量（从数据库分析结果统计）
     返回过去24小时内每3小时的数据提取量
     """
     try:
-        # 使用HourlyStatsService获取数据
-        hourly_data = await HourlyStatsService.get_hourly_data_volume()
+        now = datetime.now()
+        start_time = now - timedelta(hours=24)
+        # 查找24小时内所有已完成的自动分析任务
+        tasks = await Task.find(
+            Task.task_type == "auto_resource_analysis",
+            Task.status == "completed",
+            Task.end_time >= start_time
+        ).to_list()
         
+        # 构建8个3小时区间
+        buckets = [start_time + timedelta(hours=3*i) for i in range(9)]  # 8段+1
+        hourly_data = [0 for _ in range(8)]
+        for task in tasks:
+            if not hasattr(task, "end_time") or not task.end_time or not task.result or "categories" not in task.result:
+                continue
+            # 计算该任务属于哪个区间
+            for i in range(8):
+                if buckets[i] <= task.end_time < buckets[i+1]:
+                    # 统计本次分析的总文件数
+                    total_count = sum(cat.get("count", 0) for cat in task.result["categories"])
+                    hourly_data[i] += total_count
+                    break
+
         return {
             "code": 200,
             "message": "获取每小时数据提取量成功",
@@ -76,12 +89,11 @@ async def get_hourly_data_volume():
 async def get_alert_messages():
     """
     获取系统告警信息
-    返回最近的告警消息列表
+    返回最近的告警消息列表（直接从数据库查询）
     """
     try:
-        # 使用AlertService获取告警信息
-        alerts = await AlertService.get_alerts()
-        
+        # 从数据库获取最新的报警信息
+        alerts = await AlertService.get_alerts(limit=20)  # 默认查20条最新
         return {
             "code": 200,
             "message": "获取告警信息成功",

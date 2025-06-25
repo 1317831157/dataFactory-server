@@ -17,8 +17,6 @@ async def initialize_services():
     # 初始化AlertService
     await AlertService.initialize()
     
-    # 启动第一次数据更新
-    asyncio.create_task(HourlyStatsService._update_hourly_stats())
     
     logger.info("Services initialized successfully")
 

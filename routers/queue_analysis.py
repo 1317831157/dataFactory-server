@@ -84,22 +84,3 @@ async def start_auto_analysis():
             "data": None
         }
 
-@router.get("/output")
-async def get_analysis_output():
-    """获取分析结果"""
-    try:
-        # 获取当前结果
-        result = await ResourceQueueService.get_auto_analysis_result()
-        
-        return {
-            "code": 200,
-            "message": "Analysis output retrieved",
-            "data": result
-        }
-    except Exception as e:
-        logger.error(f"Error getting analysis output: {e}")
-        return {
-            "code": 500,
-            "message": str(e),
-            "data": None
-        }

@@ -6,6 +6,7 @@ import logging
 import sys
 from contextlib import asynccontextmanager
 from services.init_services import initialize_services
+from services.database import init_db
 from routers.data_factory_api import router as data_factory_router
 
 # 添加当前目录到Python路径
@@ -23,6 +24,7 @@ logger = logging.getLogger(__name__)
 async def lifespan(app: FastAPI):
     # 启动时执行
     logger.info("Application startup: initializing services...")
+    await init_db()
     await initialize_services()
     logger.info("Services initialized successfully")
     yield

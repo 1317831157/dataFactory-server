@@ -11,6 +11,7 @@ from pydantic import BaseModel, Field
 from services.resource_service import ResourceService
 # 导入新的服务
 from services.source_analysis_service import SourceAnalysisService
+from services.database import AnalysisResult, AnalyzedFolder, AnalyzedFile # 导入模型用于响应
 
 # 设置日志
 logger = logging.getLogger(__name__)
@@ -32,13 +33,15 @@ class DataSourceStatistics(BaseModel):
     message: str = "success"
     data: DataSourceStatisticsData
 
-class CrawlResult(BaseModel):
+class FormattedCrawlResult(BaseModel):
     title: str
     source: str
     time: str
+    fileCount: int
+    files: List[AnalyzedFile]
 
 class CrawlResultsResponse(BaseModel):
-    results: List[CrawlResult]
+    results: List[FormattedCrawlResult]
     total: int
 
 class ProcessingStatistics(BaseModel):
@@ -53,9 +56,6 @@ class AnalysisTaskRequest(BaseModel):
     dataSource: str
     parameters: Dict[str, Any]
 
-# 全局变量，用于模拟爬虫状态
-crawling_tasks = {}
-
 # 数据采集相关接口
 @router.get("/collection/statistics", response_model=DataSourceStatistics)
 async def get_source_statistics():
@@ -63,7 +63,7 @@ async def get_source_statistics():
     try:
         # 获取自动分析结果
         analysis_result = await ResourceService.get_auto_analysis_result()
-        
+        # print('analysis_result',analysis_result)
         # 初始化计数字典 - 动态创建，不预定义字段
         counts = {}
         
@@ -96,121 +96,85 @@ async def get_source_statistics():
 
 @router.post("/collection/crawl")
 async def start_crawling(request: CrawlRequest, background_tasks: BackgroundTasks):
-    """开始数据爬取"""
+    """开始数据分析。分析任务现在是持久化的。"""
     try:
-        task_id = f"crawl_{request.sourceType}_{datetime.now().strftime('%Y%m%d%H%M%S')}"
-        
-        # 检查是否已有相同类型的爬虫任务在运行
-        for tid, task in crawling_tasks.items():
-            if task.get("sourceType") == request.sourceType and task.get("status") == "running":
-                return {
-                    "code": 200,
-                    "message": "success",
-                    "data": {"task_id": tid, "status": "already_running", "message": "已有相同类型的爬虫任务在运行"}
-                }
-        
-        # 创建新任务
-        crawling_tasks[task_id] = {
-            "sourceType": request.sourceType,
-            "limit": request.limit,
-            "status": "running",
-            "startTime": datetime.now(),
-            "results": []
-        }
-        
-        # 使用新的SourceAnalysisService分析指定类型的文件
-        background_tasks.add_task(SourceAnalysisService.analyze_source_by_type, 
-                                 request.sourceType, 
-                                 request.limit)
+        # 核心逻辑已移入服务中，包括检查任务是否已在运行
+        # 我们仍然使用后台任务来避免阻塞API
+        background_tasks.add_task(
+            SourceAnalysisService.analyze_source_by_type, 
+            request.sourceType, 
+            request.limit
+        )
         
         return {
             "code": 200,
             "message": "success",
-            "data": {"task_id": task_id, "status": "started", "message": "爬取任务已启动"}
+            "data": {"status": "started", "message": "分析任务已在后台启动"}
         }
     except Exception as e:
-        logger.error(f"Error starting crawling: {e}")
+        logger.error(f"Error starting analysis: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
-@router.post("/collection/crawl/stop")
-async def stop_crawling():
-    """停止数据爬取"""
-    try:
-        # 停止所有运行中的爬虫任务
-        stopped_count = 0
-        for task_id, task in crawling_tasks.items():
-            if task.get("status") == "running":
-                task["status"] = "stopped"
-                stopped_count += 1
-        
-        return {
-            "code": 200,
-            "message": "success",
-            "data": {"stopped_count": stopped_count, "message": f"已停止{stopped_count}个爬虫任务"}
-        }
-    except Exception as e:
-        logger.error(f"Error stopping crawling: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+# @router.post("/collection/crawl/stop")
+# async def stop_crawling():
+#     """
+#     停止数据爬取 (功能已停用)。
+#     在新的持久化架构中，安全地停止一个正在遍历本地文件的任务是复杂的，
+#     需要引入更重量级的任务队列（如Celery）和进程管理。
+#     因此暂时停用此接口，以避免不可预期的行为。
+#     """
+#     return {
+#         "code": 503,
+#         "message": "Service Unavailable",
+#         "data": {"message": "此功能已停用，无法安全地中断正在进行的磁盘扫描任务。"}
+#     }
 
-@router.get("/collection/results")
+@router.get("/collection/results", response_model_exclude_none=True)
 async def get_crawl_results(
     sourceType: str = Query(..., description="数据源类型"),
     page: int = Query(1, description="页码"),
     pageSize: int = Query(10, description="每页数量")
 ):
-    """获取爬取结果"""
+    """获取指定数据源的最新分析结果。"""
     try:
-        # 直接从SourceAnalysisService获取分析结果
-        analysis_results = await SourceAnalysisService.get_analysis_result(sourceType)
+        # 1. 从服务获取持久化的分析结果
+        analysis_doc: AnalysisResult | None = await SourceAnalysisService.get_analysis_result(sourceType)
         
-        # 如果没有结果，返回空列表
-        if not analysis_results or "result" not in analysis_results:
+        # 2. 检查结果是否存在或是否已完成
+        if not analysis_doc or analysis_doc.status != "completed":
+            status_message = "分析正在进行中" if (analysis_doc and analysis_doc.status == "running") else "没有可用的分析结果"
             return {
                 "code": 200,
                 "message": "success",
-                "data": {"results": [], "total": 0}
+                "data": {"results": [], "total": 0, "status": analysis_doc.status if analysis_doc else 'not_found', "message": status_message}
             }
         
-        # 获取结果列表
-        result_list = analysis_results.get("result", [])
+        # 3. 分页处理
+        result_list: List[AnalyzedFolder] = analysis_doc.results
         total = len(result_list)
-        
-        # 计算分页
         start_idx = (page - 1) * pageSize
         end_idx = start_idx + pageSize
         paged_results = result_list[start_idx:end_idx]
         
-        # 转换为前端需要的格式
-        formatted_results = []
+        # 4. 格式化为前端需要的格式
+        formatted_results: List[FormattedCrawlResult] = []
         for item in paged_results:
-            # 从文件夹中提取第一个文件作为标题
-            title = item.get("folder_name", "未知文件夹")
-            
-            # 使用文件夹路径作为来源
-            source = item.get("folder_path", "未知路径")
-            
-            # 获取文件列表
-            files = item.get("files", [])
-            file_count = item.get("file_count", 0)
-            
-            # 创建结果项
-            result_item = {
-                "title": title,
-                "source": source,
-                "time": datetime.now().isoformat(),
-                "fileCount": file_count,
-                "files": files
-            }
-            
-            formatted_results.append(result_item)
+            # 现在 item 是一个 Pydantic 模型，我们可以直接访问属性
+            formatted_results.append(FormattedCrawlResult(
+                title=item.folder_name,
+                source=item.folder_path,
+                time=analysis_doc.timestamp.isoformat(), # 使用任务完成的时间戳
+                fileCount=item.file_count,
+                files=item.files
+            ))
         
         return {
             "code": 200,
             "message": "success",
-            "data": {"results": formatted_results, "total": total}
+            "data": {"results": formatted_results, "total": total, "status": analysis_doc.status}
         }
     except Exception as e:
-        logger.error(f"Error getting crawl results: {e}")
+        logger.error(f"Error getting analysis results: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail=str(e))
 
 # 数据处理相关接口

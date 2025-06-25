@@ -1,191 +1,145 @@
 import os
-import json
 import logging
 import asyncio
-from typing import Dict, List, Any
+from typing import List, Dict, Any
 from datetime import datetime
+from services.database import DataSource, AnalysisResult, AnalyzedFolder, AnalyzedFile, Task
+from bson import ObjectId
+from beanie.odm.operators.update.general import Set
 
-# 设置日志
 logger = logging.getLogger(__name__)
 
 class SourceAnalysisService:
-    """数据源分析服务 - 专门用于数据工厂的分析需求"""
-    
-    # 类变量，用于存储分析状态
-    _analysis_running = False
-    _analysis_results = {}
+    """
+    数据源分析服务 - 使用MongoDB进行持久化和统一任务管理。
+    """
     
     @staticmethod
-    async def analyze_source_by_type(source_type: str, limit: int = 100) -> str:
-        """根据数据源类型分析文件
-        
-        Args:
-            source_type: 数据源类型
-            limit: 限制分析的文件数量
-            
-        Returns:
-            str: 任务ID
+    async def analyze_source_by_type(source_type: str, limit: int = 100, task_id: str | None = None) -> str:
         """
+        根据数据源类型分析文件，并将结果存入数据库。任务状态通过Task模型统一管理。
+        返回 task_id。
+        """
+        # 1. 创建或获取 Task
+        if not task_id:
+            task = Task(
+                task_type="source_analysis",
+                related_id=source_type,
+                status="pending",
+                progress=0
+            )
+            await task.insert()
+            task_id = str(task.id)
+        else:
+            task = await Task.get(ObjectId(task_id))
+            if not task:
+                raise Exception(f"Task {task_id} not found")
+        
         try:
-            # 防止重复运行
-            if SourceAnalysisService._analysis_running:
-                logger.info(f"Source analysis for {source_type} already running, skipping")
-                return "already_running"
+            await Task.find_one(Task.id == ObjectId(task_id)).update({"$set": {"status": "running", "progress": 5}})
+            logger.info(f"Starting analysis for source type: '{source_type}' (task_id={task_id})")
             
-            SourceAnalysisService._analysis_running = True
-            logger.info(f"Starting analysis for source type: {source_type}")
-            
-            # 读取缓存文件获取文件夹信息
-            cache_file = os.path.join(os.path.dirname(os.path.dirname(__file__)), "cache", "auto_analysis_cache.json")
-            if not os.path.exists(cache_file):
-                logger.error("Cache file not found, cannot analyze source")
-                SourceAnalysisService._analysis_running = False
-                return "cache_not_found"
-            
-            # 加载缓存数据
-            with open(cache_file, "r", encoding="utf-8") as f:
-                cache_data = json.load(f)
-            
-            # 查找匹配的分类
-            matching_folders = []
-            source_type_lower = source_type.lower()
-            
-            for category in cache_data.get("result", []):
-                category_name = category.get("name", "").lower()
-                
-                # 检查类别名称是否匹配源类型
-                if source_type_lower in category_name:
-                    # 收集该类别下的所有文件夹
-                    if "folders" in category:
-                        matching_folders.extend(category["folders"])
-            
-            # 如果没有找到匹配的文件夹，尝试部分匹配
-            if not matching_folders:
-                for category in cache_data.get("result", []):
-                    if "folders" in category:
-                        for folder in category["folders"]:
-                            folder_name = folder.get("name", "").lower()
-                            if source_type_lower in folder_name:
-                                matching_folders.append(folder)
-            
-            # 限制文件夹数量
-            if limit and len(matching_folders) > limit:
-                matching_folders = matching_folders[:limit]
-            
-            # 分析匹配的文件夹
-            logger.info(f"Analyzing {len(matching_folders)} matching folders")
-            if not matching_folders:
-                logger.warning("No matching folders found for analysis")
-                SourceAnalysisService._analysis_running = False
-                return "no_matching_folders"
+            # 2. 查找匹配的数据源
+            source_type_regex = f".*{source_type}.*"
+            matching_sources: List[DataSource] = await DataSource.find(
+                {"category": {"$regex": source_type_regex, "$options": "i"}}
+            ).limit(limit).to_list()
+            logger.info(f"Found {len(matching_sources)} matching data sources in DB for category '{source_type}'.")
+            if not matching_sources:
+                await Task.find_one(Task.id == ObjectId(task_id)).update({"$set": {"status": "completed", "progress": 100, "result": {"folders": []}}})
+                return task_id
+            await Task.find_one(Task.id == ObjectId(task_id)).update({"$set": {"progress": 30}})
 
-            analysis_result = await SourceAnalysisService._analyze_folders(matching_folders)
-            logger.info(f"分析结果: {len(analysis_result)}")
-            if not analysis_result:
-                logger.warning("Analysis completed but returned empty result")
-            # 存储分析结果
-            SourceAnalysisService._analysis_results[source_type] = {
-                "timestamp": datetime.now().isoformat(),
-                "count": len(matching_folders),
-                "result": analysis_result
-            }
-            
-            logger.info(f"Completed analysis for source type: {source_type}, found {len(matching_folders)} folders")
-            SourceAnalysisService._analysis_running = False
-            
-            return "completed"
-            
+            # 3. 分析文件夹
+            analysis_result_list: List[AnalyzedFolder] = await SourceAnalysisService._analyze_folders(matching_sources, task_id)
+            await Task.find_one(Task.id == ObjectId(task_id)).update({"$set": {"progress": 80}})
+
+            # 4. 写入分析结果
+            await AnalysisResult.find_one(AnalysisResult.source_type == source_type).upsert(
+                Set({
+                    AnalysisResult.status: "completed",
+                    AnalysisResult.timestamp: datetime.now(),
+                    AnalysisResult.results: analysis_result_list,
+                    AnalysisResult.analyzed_folders_count: len(analysis_result_list)
+                }),
+                on_insert=AnalysisResult(
+                    source_type=source_type,
+                    timestamp=datetime.now(),
+                    analyzed_folders_count=len(analysis_result_list),
+                    results=analysis_result_list,
+                    status="completed"
+                )
+            )
+            await Task.find_one(Task.id == ObjectId(task_id)).update({"$set": {"status": "completed", "progress": 100, "result": {"folders": [f.folder_path for f in analysis_result_list]}, "end_time": datetime.now()}})
+            logger.info(f"Successfully completed analysis for '{source_type}' (task_id={task_id}).")
+            return task_id
         except Exception as e:
-            logger.error(f"Error analyzing source type {source_type}: {e}")
-            SourceAnalysisService._analysis_running = False
-            return f"error: {str(e)}"
+            logger.error(f"Error during analysis for '{source_type}': {e}", exc_info=True)
+            await Task.find_one(Task.id == ObjectId(task_id)).update({"$set": {"status": "failed", "error": str(e), "end_time": datetime.now()}})
+            return task_id
     
     @staticmethod
-    async def _analyze_folders(folders: List[Dict]) -> List[Dict]:
-        """分析文件夹内容
-        
-        Args:
-            folders: 文件夹列表
-        
-        Returns:
-            List[Dict]: 分析结果
+    async def _analyze_folders(sources: List[DataSource], task_id: str = None) -> List[AnalyzedFolder]:
+        """
+        分析文件夹内容。输入的是DataSource模型列表。支持进度更新。
         """
         results = []
-        
-        logger.info(f"Starting to analyze {len(folders)} folders")
-        for i, folder in enumerate(folders):
-            folder_path = folder.get("path")
-            folder_name = folder.get("name", "未知文件夹")
-            
-            logger.info(f"Processing folder {i+1}/{len(folders)}: {folder_name}")
-            
-            if not folder_path:
-                logger.warning(f"Folder path is empty for {folder_name}")
+        total = len(sources)
+        for idx, source in enumerate(sources):
+            if not source.path or not os.path.exists(source.path):
+                logger.warning(f"Path does not exist or is invalid, skipping: {source.path}")
                 continue
-                
-            if not os.path.exists(folder_path):
-                logger.warning(f"Folder path does not exist: {folder_path}")
-                continue
-            
             try:
-                # 收集文件夹中的文件信息
-                files = []
-                file_count = 0
-                
-                for root, _, filenames in os.walk(folder_path):
+                files_info: List[AnalyzedFile] = []
+                for root, _, filenames in os.walk(source.path):
                     for filename in filenames:
-                        file_count += 1
                         file_path = os.path.join(root, filename)
                         _, ext = os.path.splitext(filename)
-                        
-                        # 只收集常见文件类型
-                        if ext.lower() in ['.pdf', '.doc', '.docx', '.txt', '.xls', '.xlsx', '.ppt', '.pptx']:
+                        if ext.lower() in ['.pdf', '.doc', '.docx', '.txt', '.xls', '.xlsx', '.ppt', '.pptx', '.json']:
                             try:
-                                file_size = os.path.getsize(file_path)
-                                file_modified = datetime.fromtimestamp(os.path.getmtime(file_path)).isoformat()
-                                
-                                files.append({
-                                    "name": filename,
-                                    "path": file_path,
-                                    "size": file_size,
-                                    "type": ext.lower(),
-                                    "modified": file_modified
-                                })
-                            except Exception as e:
-                                logger.warning(f"Error processing file {file_path}: {e}")
-            
-                logger.info(f"Found {file_count} total files, {len(files)} matching files in {folder_name}")
-                
-                # 添加到结果中
-                results.append({
-                    "folder_name": folder_name,
-                    "folder_path": folder_path,
-                    "file_count": len(files),
-                    "files": files[:10]  # 只返回前10个文件，避免数据过大
-                })
-                logger.info(f"Added folder {folder_name} to results, current results count: {len(results)}")
+                                files_info.append(AnalyzedFile(
+                                    name=filename,
+                                    path=file_path,
+                                    size=os.path.getsize(file_path),
+                                    type=ext.lower(),
+                                    modified=datetime.fromtimestamp(os.path.getmtime(file_path))
+                                ))
+                            except Exception as file_e:
+                                logger.warning(f"Could not process file {file_path}: {file_e}")
+                results.append(AnalyzedFolder(
+                    folder_name=source.name,
+                    folder_path=source.path,
+                    file_count=len(files_info),
+                    files=files_info[:20]
+                ))
+                # 进度更新
+                if task_id:
+                    progress = 30 + int(50 * (idx + 1) / total)
+                    await Task.find_one(Task.id == ObjectId(task_id)).update({"$set": {"progress": progress}})
             except Exception as e:
-                logger.error(f"Error analyzing folder {folder_path}: {e}")
+                logger.error(f"Error analyzing folder {source.path}: {e}")
                 continue
-        
-        logger.info(f"Analysis completed, returning {len(results)} folder results")
         return results
     
     @staticmethod
-    async def get_analysis_result(source_type: str) -> Dict:
-        """获取指定类型的分析结果
-        
-        Args:
-            source_type: 数据源类型
-            
-        Returns:
-            Dict: 分析结果
+    async def get_analysis_result(source_type: str) -> AnalysisResult | None:
         """
-        # 如果没有结果，返回空对象
-        if source_type not in SourceAnalysisService._analysis_results:
-            return {}
-        
-        return SourceAnalysisService._analysis_results[source_type]
+        从数据库获取指定类型的最新分析结果。
+        """
+        return await AnalysisResult.find_one(AnalysisResult.source_type == source_type)
+
+    @staticmethod
+    async def get_task_status(task_id: str) -> Dict:
+        """
+        查询分析任务的状态和进度。
+        """
+        try:
+            task = await Task.get(ObjectId(task_id))
+            if not task:
+                return {"status": "not_found"}
+            return task.model_dump(by_alias=True, exclude={'id'})
+        except Exception:
+            return {"status": "not_found", "error": "Invalid ID format"}
 
 
 

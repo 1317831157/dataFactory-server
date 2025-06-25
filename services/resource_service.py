@@ -7,44 +7,49 @@ sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from models.resource import ResourceItem
 import pathlib
-from typing import List, Dict, Tuple
+from typing import List, Dict, Tuple, Any
 import random
 import json
 import hashlib
 import aiohttp
 import asyncio
 import logging
-from typing import List, Dict, Any
 from datetime import datetime, timedelta
 import uuid
 import time
 from concurrent.futures import ThreadPoolExecutor
 import re
+from bson import ObjectId
+import concurrent.futures
+import multiprocessing
+
+# 导入新的数据库模型和 pymongo 操作
+from services.database import DataSource, Task
+from pymongo import UpdateOne
 
 # 配置日志
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
 
-class AnalysisTask:
-    def __init__(self, task_id):
-        self.task_id = task_id
-        self.status = "pending"  # pending, running, completed, failed
-        self.progress = 0
-        self.result = None
-        self.error = None
-        self.start_time = time.time()
-        self.is_auto_analysis = False  # 默认不是自动分析任务
+def collect_files_mp(base_dir):
+    result = []
+    try:
+        for root, _, files in os.walk(base_dir):
+            for file in files:
+                if file.lower().endswith((".pdf", ".json")):
+                    result.append(os.path.join(root, file))
+    except Exception as e:
+        print(f"Error walking {base_dir}: {e}")
+    print(f"Finish scanning: {base_dir}, found {len(result)} files")
+    return result
 
 class ResourceService:
-    """资源服务类"""
+    """资源服务类 - 使用MongoDB进行任务管理"""
     
     # 缓存分类结果，避免频繁请求大模型API
     _cache = {}
     _cache_time = None
     _cache_duration = timedelta(hours=1)  # 缓存有效期1小时
-    
-    # 存储任务状态的字典
-    _analysis_tasks = {}
     
     # 添加类变量用于存储自动分析的结果
     _auto_analysis_result = None
@@ -159,108 +164,39 @@ class ResourceService:
     
     @staticmethod
     def _smart_categorize_folders(folder_info: List[Dict]) -> Dict[str, List[Dict]]:
-        """基于文件夹名称的智能分类方法"""
-        categories = {}
-        
-        # 动态生成分类规则，而不是使用预定义的分类
-        category_rules = {}
-        
-        # 从文件夹名称中提取关键词
-        keywords_freq = {}
+        """
+        只分析pdf和json文件的文件名（不分析文件夹名），将文件夹归入五大类。
+        如果没有命中任何类别，则该文件夹被过滤掉。
+        """
+        categories = {"学术论文": [], "调查报告": [], "专业书籍": [], "政策文件": [], "法规标准": []}
+        # 关键词映射
+        keyword_map = {
+            "学术论文": ["paper", "论文", "thesis", "article"],
+            "调查报告": ["report", "调查", "survey"],
+            "专业书籍": ["book", "专著", "教材", "manual", "handbook"],
+            "政策文件": ["policy", "政策", "guideline", "规划"],
+            "法规标准": ["regulation", "标准", "规范", "law", "条例"]
+        }
+
         for folder in folder_info:
-            folder_name = folder['name'].lower()
-            # 分割文件夹名称为单词
-            words = re.findall(r'[a-zA-Z\u4e00-\u9fa5]+', folder_name)
-            for word in words:
-                if len(word) > 2:  # 忽略太短的词
-                    keywords_freq[word] = keywords_freq.get(word, 0) + 1
-        
-        # 选择出现频率较高的关键词作为分类依据
-        top_keywords = sorted(keywords_freq.items(), key=lambda x: x[1], reverse=True)[:20]
-        
-        # 根据关键词生成分类
-        for keyword, _ in top_keywords:
-            # 避免重复的分类
-            if any(keyword in existing_keywords for existing_keywords in category_rules.values()):
-                continue
-                
-            # 创建新的分类
-            category_name = f"{keyword}相关文件"
-            category_rules[category_name] = [keyword]
-            
-            # 如果分类数量达到10个，停止添加
-            if len(category_rules) >= 5:
-                break
-        
-        # 如果没有足够的分类，添加一些通用分类
-        if len(category_rules) < 5:
-            default_categories = {
-                "文档资料": ["doc", "pdf", "txt", "文档", "资料"],
-                "媒体文件": ["media", "photo", "video", "music", "媒体", "照片", "视频", "音乐"],
-                "开发项目": ["code", "dev", "src", "代码", "开发", "源码"],
-                "系统文件": ["system", "config", "系统", "配置"],
-                "其他文件": ["other", "misc", "其他", "杂项"]
-            }
-            
-            for category, keywords in default_categories.items():
-                if category not in category_rules:
-                    category_rules[category] = keywords
-        
-        # 为每个文件夹分类
-        for folder in folder_info:
-            folder_name = folder['name'].lower()
-            folder_path = folder['relative_path'].lower()
-            
-            # 寻找最佳匹配的分类
-            best_category = None
-            best_score = 0
-            
-            for category, keywords in category_rules.items():
-                score = 0
-                
-                # 检查文件夹名称中的关键词
-                for keyword in keywords:
-                    if keyword in folder_name:
-                        score += 3  # 文件夹名称匹配权重更高
-                    if keyword in folder_path:
-                        score += 1  # 路径匹配权重较低
-                
-                # 更新最佳匹配
-                if score > best_score:
-                    best_score = score
-                    best_category = category
-            
-            # 如果没有找到匹配的分类，根据文件夹名称特征判断
-            if not best_category:
-                best_category = ResourceService._classify_by_name_pattern(folder_name)
-            
-            # 如果还是没有分类，归为"其他文件夹"
-            if not best_category:
-                best_category = "其他文件夹"
-            
-            # 添加到分类中
-            if best_category not in categories:
-                categories[best_category] = []
-            categories[best_category].append(folder)
-        
-        # 限制分类数量，合并小分类
-        if len(categories) > 8:
-            # 按文件夹数量排序
-            sorted_categories = sorted(categories.items(), key=lambda x: len(x[1]), reverse=True)
-            
-            # 保留前7个最大的分类
-            main_categories = dict(sorted_categories[:7])
-            
-            # 将剩余的小分类合并为"其他文件夹"
-            other_folders = []
-            for category, folders in sorted_categories[7:]:
-                other_folders.extend(folders)
-            
-            if other_folders:
-                main_categories["其他文件夹"] = other_folders
-            
-            categories = main_categories
-        
+            folder_path = folder['path']
+            file_type_count = {k: 0 for k in categories}
+            # 遍历该文件夹下所有pdf/json文件
+            for root, _, files in os.walk(folder_path):
+                for file in files:
+                    if not file.lower().endswith(('.pdf', '.json')):
+                        continue
+                    fname = file.lower()
+                    for cat, keywords in keyword_map.items():
+                        if any(kw in fname for kw in keywords):
+                            file_type_count[cat] += 1
+                            break  # 命中一个类别就不再继续
+            # 该文件夹的分类由最多的那一类决定
+            total_hits = sum(file_type_count.values())
+            if total_hits == 0:
+                continue  # 该文件夹下没有命中任何类别的pdf/json文件，跳过
+            main_cat = max(file_type_count, key=lambda k: file_type_count[k])
+            categories[main_cat].append(folder)
         return categories
     
     @staticmethod
@@ -344,575 +280,286 @@ class ResourceService:
 
     @staticmethod
     async def start_analysis_task(base_dir: str, file_list=None, options=None) -> str:
-        """启动异步分析任务
-        
-        Args:
-            base_dir: 基础目录路径
-            file_list: 文件列表，如果提供则只分析这些文件
-            options: 其他选项
-        
-        Returns:
-            str: 任务ID
-        """
-        # 生成唯一任务ID
-        task_id = str(uuid.uuid4())
-        
+        """启动异步分析任务，并将任务状态存入数据库"""
         # 如果目录为空或不存在，使用默认目录
         if not base_dir or not os.path.exists(base_dir):
             base_dir = os.path.join(os.path.expanduser("~"), "Documents")
         
-        # 创建任务对象
-        task = AnalysisTask(task_id)
-        # 使用类变量存储任务
-        ResourceService._analysis_tasks[task_id] = task
+        # 创建任务并存入数据库
+        task = Task(
+            task_type="resource_analysis",
+            related_id=base_dir # 使用基础目录作为关联ID
+        )
+        await task.insert()
         
-        # 启动异步任务
-        asyncio.create_task(ResourceService._run_analysis_task(task, base_dir, file_list, options))
+        # 启动异步任务, task.id 是 ObjectId, 需要转为 str
+        asyncio.create_task(ResourceService._run_analysis_task(str(task.id), base_dir, file_list, options))
         
-        return task_id
+        return str(task.id)
 
     @staticmethod
     async def get_task_status(task_id: str) -> Dict:
-        """获取任务状态"""
-        # 添加调试日志
-        logger.info(f"Getting task status for task_id: {task_id}")
-        logger.info(f"Available tasks: {list(ResourceService._analysis_tasks.keys())}")
+        """从数据库获取任务状态"""
+        try:
+            # Beanie's get method uses Pydantic's ObjectId, so we must convert the string
+            task = await Task.get(ObjectId(task_id))
+        except Exception:
+            # This can happen if the task_id is not a valid ObjectId format
+            logger.warning(f"Task not found or invalid ID format: {task_id}")
+            return {"status": "not_found", "error": "Invalid ID format"}
         
-        task = ResourceService._analysis_tasks.get(task_id)
         if not task:
             logger.warning(f"Task not found: {task_id}")
             return {"status": "not_found"}
         
-        result = {
-            "status": task.status,
-            "progress": task.progress
-        }
-        
-        # 如果任务完成，返回结果
-        if task.status == "completed":
-            result["result"] = task.result
-        elif task.status == "failed":
-            result["error"] = str(task.error)
-        
-        # 计算运行时间
-        result["elapsed_time"] = time.time() - task.start_time
-        
-        logger.info(f"Task status: {result}")
-        return result
+        # 使用 model_dump 返回 Pydantic 模型兼容的字典
+        return task.model_dump(by_alias=True, exclude={'id'})
 
     @staticmethod
-    async def _run_analysis_task(task: AnalysisTask, base_dir: str, file_list=None, options=None):
-        """运行分析任务"""
+    async def _run_analysis_task(task_id: str, base_dir: str, file_list=None, options=None):
+        """运行分析任务，并更新数据库中的任务状态"""
+        task_obj_id = ObjectId(task_id)
         try:
-            task.status = "running"
-            task.progress = 5
+            await Task.find_one(Task.id == task_obj_id).update({"$set": {"status": "running", "progress": 5}})
             
             if file_list:
                 logger.info(f"Using provided file list with {len(file_list)} files")
                 
-                # 处理文件列表，按文件夹分组
                 folder_structure = {}
                 for file in file_list:
                     path = file["path"]
-                    # 提取文件所在的文件夹路径
                     folder_path = os.path.dirname(path)
                     
-                    if not folder_path:
-                        folder_path = "根目录"
-                    
-                    if folder_path not in folder_structure:
-                        folder_structure[folder_path] = []
-                    
+                    if not folder_path: folder_path = "根目录"
+                    if folder_path not in folder_structure: folder_structure[folder_path] = []
                     folder_structure[folder_path].append(file)
                 
-                # 直接使用文件夹名称作为分类
                 categories = {}
                 for folder_path, files in folder_structure.items():
                     folder_name = os.path.basename(folder_path)
-                    if not folder_name:
-                        folder_name = os.path.basename(os.path.dirname(folder_path))
-                    if not folder_name:
-                        folder_name = "其他"
-                    
-                    if folder_name not in categories:
-                        categories[folder_name] = []
-                    
+                    if not folder_name: folder_name = os.path.basename(os.path.dirname(folder_path))
+                    if not folder_name: folder_name = "其他"
+                    if folder_name not in categories: categories[folder_name] = []
                     categories[folder_name].extend(files)
                 
-                task.progress = 90
+                task_progress = 90
             else:
-                # 收集文件夹信息
                 folder_info = await ResourceService._collect_folder_info(base_dir)
-                task.progress = 50
+                await Task.find_one(Task.id == task_obj_id).update({"$set": {"progress": 50}})
                 
-                # 智能分析文件夹并生成分类
                 categories = ResourceService._smart_categorize_folders(folder_info)
-                task.progress = 90
+                task_progress = 90
             
-            # 构建最终结果
+            await Task.find_one(Task.id == task_obj_id).update({"$set": {"progress": task_progress}})
+
             result = []
             for category, items in categories.items():
                 result.append({
-                    "id": len(result) + 1,
-                    "name": category,
-                    "count": len(items),
-                    "icon": ResourceService._select_icon(category),
-                    "color": ResourceService._generate_color(category),
-                    "folders": items if not file_list else []  # 如果是文件列表分析，不返回文件夹
+                    "id": len(result) + 1, "name": category, "count": len(items),
+                    "icon": ResourceService._select_icon(category), "color": ResourceService._generate_color(category),
+                    "folders": items if not file_list else []
                 })
             
-            # 更新任务状态
-            task.status = "completed"
-            task.progress = 100
-            task.result = result
+            await Task.find_one(Task.id == task_obj_id).update({"$set": {
+                "status": "completed", "progress": 100, 
+                "result": {"categories": result}, "end_time": datetime.now()
+            }})
             
-            # 更新缓存
             ResourceService._cache = result
             ResourceService._cache_time = datetime.now()
             
         except Exception as e:
-            logger.error(f"Analysis task failed: {e}")
-            task.status = "failed"
-            task.error = e
+            logger.error(f"Analysis task failed: {e}", exc_info=True)
+            await Task.find_one(Task.id == task_obj_id).update({"$set": {
+                "status": "failed", "error": str(e), "end_time": datetime.now()
+            }})
 
     @staticmethod
     async def auto_analyze_local_directories():
-        """自动分析本地文件夹"""
-        print("自动分析本地文件夹",ResourceService._auto_analysis_running)
-        # 防止重复运行
+        """递归遍历所有目录，只收集 pdf 和 json 文件，LLM 分类，结果入库（分块递归+多进程优化）"""
         if ResourceService._auto_analysis_running:
             logger.info("Auto analysis already running, skipping")
             return
-        
         try:
-            # 设置运行标志
             ResourceService._auto_analysis_running = True
-            logger.info("Starting automatic analysis of local directories")
-            
-            # 获取用户主目录
+            logger.info("Starting automatic analysis of local directories (recursive, pdf/json only, multiprocess)")
+
+            import multiprocessing
             home_dir = os.path.expanduser("~")
-            
-            # 直接添加D盘、E盘、F盘等非C盘目录
-            drive_dirs = []
-            for drive_letter in "DEFGHIJKLMNOPQRSTUVWXYZ":
-                drive_path = f"{drive_letter}:\\"
-                if os.path.exists(drive_path):
-                    logger.info(f"Found drive: {drive_path}")
-                    drive_dirs.append(drive_path)
-            
-            # 如果找到了其他驱动器，使用它们代替home_dir
-            if drive_dirs:
-                logger.info(f"Using drives: {drive_dirs} instead of home directory")
-                common_dirs = []  # 初始化为空列表
-                
-                # 为每个驱动器收集目录
-                for drive in drive_dirs:
-                    try:
-                        # 添加驱动器根目录
-                        common_dirs.append(drive)
-                        
-                        # 添加第一层目录
-                        with os.scandir(drive) as entries:
-                            for entry in entries:
-                                if entry.is_dir() and not entry.name.startswith('.'):
-                                    common_dirs.append(entry.path)
-                    except Exception as e:
-                        logger.error(f"Error scanning drive {drive}: {e}")
-            else:
-                logger.info(f"No additional drives found, using home directory: {home_dir}")
-                common_dirs = []  # 初始化为空列表
-                
-                # 不使用预定义目录，而是动态获取用户目录下的所有子目录（最大3层）
+            drive_dirs = [f"{d}:\\" for d in "DEFGHIJKLMNOPQRSTUVWXYZ" if os.path.exists(f"{d}:\\")]
+            scan_dirs = drive_dirs if drive_dirs else [home_dir]
+            common_dirs = [d for d in scan_dirs if not d.startswith("C:")]
+
+            # 先收集所有盘符和一级子目录
+            all_start_dirs = []
+            for base in common_dirs:
+                all_start_dirs.append(base)
                 try:
-                    # 添加第一层目录，但跳过C盘路径
-                    with os.scandir(home_dir) as entries:
+                    with os.scandir(base) as entries:
                         for entry in entries:
                             if entry.is_dir() and not entry.name.startswith('.'):
-                                # 跳过C盘路径
-                                if entry.path.startswith("C:"):
-                                    logger.info(f"Skipping C: drive path: {entry.path}")
-                                    continue
-                                common_dirs.append(entry.path)
+                                all_start_dirs.append(entry.path)
                 except Exception as e:
-                    logger.error(f"Error scanning home directory: {e}")
-            
-            # 收集存在的目录，排除C盘路径
-            existing_dirs = [d for d in common_dirs if os.path.exists(d) and os.path.isdir(d) and not d.startswith("C:")]
-            logger.info(f"After filtering, {len(existing_dirs)} directories remain")
-            
-            # 如果没有找到任何目录，添加用户主目录（如果不在C盘）
-            if not existing_dirs and not home_dir.startswith("C:"):
-                existing_dirs.append(home_dir)
-                logger.info(f"No directories found, using home directory: {home_dir}")
-            
-            # 如果仍然没有目录，创建一个空结果
-            if not existing_dirs:
-                logger.warning("No valid directories found for analysis")
-                # 创建一个空结果
-                ResourceService._auto_analysis_result = []
-                ResourceService._auto_analysis_time = datetime.now()
-                ResourceService._auto_analysis_running = False
-                return
-            
-            # 创建分析任务
-            task_id = str(uuid.uuid4())
-            task = AnalysisTask(task_id)
-            task.is_auto_analysis = True  # 明确标记为自动分析任务
-            ResourceService._analysis_tasks[task_id] = task
-            logger.info(f"Created auto analysis task with ID: {task_id}")
-            # logger.info(f"existing_dirs: {existing_dirs}")
-            # 运行分析任务
-            await ResourceService._run_auto_analysis(task, existing_dirs)
-            
-            # 存储结果
-            if task.status == "completed":
-                # 缓存分析结果
-                ResourceService._auto_analysis_result = task.result
-                ResourceService._auto_analysis_time = datetime.now()
-                
-                # 将结果保存到本地文件，以便服务重启后仍能使用
-                try:
-                    cache_dir = os.path.join(os.path.dirname(os.path.dirname(__file__)), "cache")
-                    os.makedirs(cache_dir, exist_ok=True)
-                    
-                    cache_file = os.path.join(cache_dir, "auto_analysis_cache.json")
-                    with open(cache_file, "w", encoding="utf-8") as f:
-                        json.dump({
-                            "result": task.result,
-                            "timestamp": datetime.now().isoformat()
-                        }, f, ensure_ascii=False, indent=2)
-                    
-                    logger.info(f"Cached analysis result to {cache_file}")
-                except Exception as e:
-                    logger.error(f"Failed to cache analysis result: {e}")
-                
-                logger.info(f"Automatic analysis completed with {len(task.result)} categories")
+                    logger.warning(f"Error scanning {base}: {e}")
+
+            # 用多进程池同步收集，避免与 asyncio 混用导致卡死
+            all_files = []
+            if all_start_dirs:
+                with multiprocessing.get_context("spawn").Pool(processes=min(16, os.cpu_count() or 1)) as pool:
+                    results = pool.map(collect_files_mp, all_start_dirs)
+                    for files in results:
+                        all_files.extend(files)
+            logger.info(f"Total pdf/json files collected文件数量: {len(all_files)}")
+
+            # 2. LLM 分类（失败则本地规则）
+            try:
+                categories = await ResourceService._analyze_with_deepseek(all_files)
+            except Exception as e:
+                logger.warning(f"DeepSeek analysis failed: {e}, falling back to basic categorization")
+                from services.alert_service import AlertService
+                await AlertService.add_alert(
+                    message=f"DeepSeek LLM 分类失败: {str(e)}，已切换为本地规则",
+                    level="warning",
+                    extra={"task_type": "auto_resource_analysis"}
+                )
+                categories = ResourceService._smart_categorize_folders(all_files)
+
+            # 3. 整理分类结果
+            result = [
+                {"id": i + 1, "name": cat, "count": len(files),
+                 "icon": ResourceService._select_icon(cat), "color": ResourceService._generate_color(cat),
+                 "files": files[:50]}
+                for i, (cat, files) in enumerate(categories.items())
+            ]
+
+            # 4. 写入数据库
+            from services.alert_service import AlertService
+            existing_task = await Task.find_one(Task.task_type == "auto_resource_analysis")
+            if existing_task:
+                await Task.find_one(Task.id == existing_task.id).update({
+                    "$set": {
+                        "status": "completed",
+                        "progress": 100,
+                        "result": {"categories": result},
+                        "end_time": datetime.now()
+                    }
+                })
             else:
-                logger.error(f"Automatic analysis failed: {task.error}")
-        
+                new_task = Task(task_type="auto_resource_analysis", status="completed", start_time=datetime.now(), end_time=datetime.now(), result={"categories": result})
+                await new_task.insert()
+            logger.info("Auto analysis completed and categories saved to DB.")
         except Exception as e:
             logger.error(f"Error in automatic analysis: {e}")
+            from services.alert_service import AlertService
+            await AlertService.add_alert(
+                message=f"自动分析任务异常: {str(e)}",
+                level="error",
+                extra={"task_type": "auto_resource_analysis"}
+            )
         finally:
-            # 确保在函数结束时重置运行标志
             ResourceService._auto_analysis_running = False
-            logger.info("Auto analysis completed, reset running flag to False")
-
-    @staticmethod
-    async def _run_auto_analysis(task: AnalysisTask, directories: List[str]):
-        """运行自动分析任务 - 基于文件夹进行智能分类"""
-        try:
-            task.status = "running"
-            task.progress = 5
-            
-            # 检查目录列表是否为空
-            if not directories:
-                logger.warning("No directories to analyze")
-                task.status = "completed"
-                task.progress = 100
-                task.result = []  # 返回空结果
-                return
-            
-            # 收集所有目录下的文件夹信息
-            all_folder_info = []
-            
-            for i, directory in enumerate(directories):
-                try:
-                    logger.info(f"Processing directory {i+1}/{len(directories)}: {directory}")
-                    # 使用并行处理替代单线程收集文件夹信息
-                    # 创建一个有限深度的文件夹收集函数
-                    folder_info = await ResourceService._collect_folder_info_limited(directory, max_depth=2)
-                    all_folder_info.extend(folder_info)
-                    
-                    # 更新进度
-                    task.progress = 5 + int((i + 1) / len(directories) * 50)
-                    logger.info(f"Collected {len(folder_info)} folders from {directory}")
-                except Exception as e:
-                    logger.error(f"Error processing directory {directory}: {e}")
-                    continue
-            
-            logger.info(f"Total folders collected: {len(all_folder_info)}")
-            
-            # 如果没有收集到任何文件夹信息，返回空结果
-            if not all_folder_info:
-                logger.warning("No folder information collected")
-                task.status = "completed"
-                task.progress = 100
-                task.result = []
-                return
-            
-            # 优先使用大模型分析文件夹并生成分类
-            try:
-                # 尝试使用DeepSeek大模型分析
-                categories = await ResourceService._analyze_with_deepseek(all_folder_info)
-                logger.info("Successfully used DeepSeek model for folder categorization")
-            except Exception as e:
-                # 如果大模型分析失败，回退到原有的分析方法
-                logger.warning(f"DeepSeek analysis failed: {e}, falling back to basic categorization")
-                categories = ResourceService._smart_categorize_folders(all_folder_info)
-            task.progress = 90
-            
-            # 构建最终结果
-            result = []
-            for category, folders in categories.items():
-                result.append({
-                    "id": len(result) + 1,
-                    "name": category,
-                    "count": len(folders),
-                    "icon": ResourceService._select_icon(category),
-                    "color": ResourceService._generate_color(category),
-                    "folders": folders[:50]  # 限制文件夹数量，避免返回过多数据
-                })
-            
-            logger.info(f'Auto analysis result: {len(result)} categories')
-            
-            # 更新任务状态
-            task.status = "completed"
-            task.progress = 100
-            task.result = result
-        except Exception as e:
-            logger.error(f"Auto analysis task failed: {e}")
-            task.status = "failed"
-            task.error = str(e)
+            logger.info("Auto analysis completed, reset running flag.")
 
     @staticmethod
     async def get_auto_analysis_result():
-        """获取自动分析结果"""
-        # 如果内存中有结果且未过期，直接返回
-        if (ResourceService._auto_analysis_result is not None and 
-            ResourceService._auto_analysis_time is not None and
-            datetime.now() - ResourceService._auto_analysis_time < timedelta(hours=24)):
-            logger.info("Using in-memory auto analysis result")
-            return ResourceService._auto_analysis_result
-        
-        # 如果内存中没有结果或已过期，尝试从缓存文件加载
+        """获取自动分析结果（每次都查数据库，不用内存缓存）"""
         try:
-            cache_file = os.path.join(os.path.dirname(os.path.dirname(__file__)), "cache", "auto_analysis_cache.json")
-            if os.path.exists(cache_file):
-                with open(cache_file, "r", encoding="utf-8") as f:
-                    cache_data = json.load(f)
-                
-                # 修复这一行，使用正确的logger.error格式
-                logger.info(f"ResourceService auto analysis result: {ResourceService._auto_analysis_result}")
-                
-                # 检查缓存是否过期（24小时）
-                cache_time = datetime.fromisoformat(cache_data["timestamp"])
-                if datetime.now() - cache_time < timedelta(hours=24):
-                    logger.info("Loaded auto analysis result from cache file")
-                    ResourceService._auto_analysis_result = cache_data["result"]
-                    ResourceService._auto_analysis_time = cache_time
-                    return ResourceService._auto_analysis_result
+            # 直接从数据库任务中获取最新成功的结果
+            task = await Task.find_one(
+                Task.task_type == "auto_resource_analysis",
+                Task.status == "completed",
+                sort=[("end_time", -1)]
+            )
+            if task and task.end_time and (datetime.now() - task.end_time < timedelta(hours=24)):
+                logger.info("Loaded auto analysis result from completed DB task")
+                result = task.result.get("categories") if task.result else None
+                return result
         except Exception as e:
-            logger.error(f"Failed to load cached analysis result: {e}")
+            logger.error(f"Failed to load analysis result from DB task: {e}")
         
-        # 如果没有有效的缓存，重新分析
-        logger.info("No valid cache found, starting new auto analysis")
+        logger.info("No valid recent task found, starting new auto analysis")
         await ResourceService.auto_analyze_local_directories()
-        
-        return ResourceService._auto_analysis_result
+        # 新任务刚启动时还没有结果，这里返回 None 或空
+        return None
 
     @staticmethod
     async def get_cached_analysis_result():
         """只获取缓存的分析结果，不触发新的分析"""
-        # 清空内存缓存
         ResourceService._auto_analysis_result = None
         ResourceService._auto_analysis_time = None
         
-        # 检查文件缓存
         try:
             cache_file = os.path.join(os.path.dirname(os.path.dirname(__file__)), "cache", "auto_analysis_cache.json")
             if os.path.exists(cache_file):
-                # 清空文件缓存
                 os.remove(cache_file)
                 logger.info(f"Removed cache file: {cache_file}")
-                return None
         except Exception as e:
             logger.error(f"Failed to remove cached analysis result: {e}")
         
-        # 如果没有有效的缓存，返回None
         return None
 
     @staticmethod
-    async def _collect_folder_info_limited(base_dir: str, max_depth: int = 2) -> List[Dict]:
-        """收集目录中的文件夹信息，限制深度以提高性能"""
-        folder_info = []
-        
-        # 如果是C盘路径，直接返回空列表
-        if base_dir.startswith("C:"):
-            logger.info(f"Skipping C: drive path: {base_dir}")
-            return folder_info
-        
-        # 使用异步执行以避免阻塞
-        loop = asyncio.get_event_loop()
-        
-        def scan_directory(dir_path, current_depth=0):
-            """递归扫描目录，但限制深度"""
-            results = []
-            
-            if current_depth > max_depth:
-                return results
-            
-            try:
-                # 使用os.scandir更高效地扫描目录
-                with os.scandir(dir_path) as entries:
-                    for entry in entries:
-                        try:
-                            # 只处理目录
-                            if entry.is_dir():
-                                # 跳过隐藏目录和系统目录
-                                if entry.name.startswith('.') or entry.name.startswith('$'):
-                                    continue
-                                
-                                # 获取文件夹信息
-                                dir_stat = entry.stat()
-                                
-                                # 计算文件夹深度
-                                depth = current_depth + 1
-                                
-                                # 收集文件夹信息
-                                results.append({
-                                    'name': entry.name,
-                                    'path': entry.path,
-                                    'depth': depth,
-                                    'modified': datetime.fromtimestamp(dir_stat.st_mtime).isoformat(),
-                                    'relative_path': os.path.relpath(entry.path, base_dir)
-                                })
-                                
-                                # 如果深度未达到最大值，继续递归
-                                if depth < max_depth:
-                                    results.extend(scan_directory(entry.path, depth))
-                        except (PermissionError, FileNotFoundError) as e:
-                            # 忽略权限错误和文件不存在错误
-                            continue
-                        except Exception as e:
-                            logger.warning(f"Error processing entry {entry.path}: {e}")
-            except Exception as e:
-                logger.warning(f"Error scanning directory {dir_path}: {e}")
-            
-            return results
-        
-        # 在线程池中执行目录扫描
-        try:
-            # 使用线程池执行IO密集型操作
-            with ThreadPoolExecutor(max_workers=min(32, (os.cpu_count() or 1) * 4)) as executor:
-                folder_info = await loop.run_in_executor(executor, scan_directory, base_dir)
-        except Exception as e:
-            logger.error(f"Error in folder collection for {base_dir}: {e}")
-        
-        return folder_info
-
-    @staticmethod
     async def _analyze_with_deepseek(folder_info: List[Dict]) -> Dict[str, List[Dict]]:
-        """使用DeepSeek大模型分析文件夹并生成分类"""
+        """使用DeepSeek大模型分析文件夹并生成五大固定分类"""
         try:
-            # DeepSeek API配置
-            api_url = "https://api.deepseek.com/v1"
-            # api_key = os.environ.get("DEEPSEEK_API_KEY")
-            api_key ='sk-0c98c2a93954490aab152eeec9da1601'
+            api_key = os.environ.get("DEEPSEEK_API_KEY", "sk-0c98c2a93954490aab152eeec9da1601")
             if not api_key:
-                logger.error("DeepSeek API key not found in environment variables")
                 raise ValueError("DeepSeek API key not found")
-            
-            # 限制样本数量，避免请求过大
             sample_size = min(100, len(folder_info))
-            sample_folders = random.sample(folder_info, sample_size) if len(folder_info) > sample_size else folder_info
-            
-            # 构建提示词
+            sample_folders = random.sample(folder_info, sample_size)
+            # 明确要求只能用五个类别
             prompt = f"""
-            请分析以下文件夹列表，并根据文件夹名称和路径将它们分类到适当的类别中。
-            请创建有意义的类别，这些类别应该反映文件夹的实际内容和用途。
-            例如，"项目文档"、"学习资料"、"工作文件"等。
+你是一个文件分类专家。请根据下列文件的文件名（和路径），将它们严格分类到以下五个类别之一：
+1. 学术论文 (Academic Paper)
+2. 调查报告 (Survey Report)
+3. 专业书籍 (Professional Book)
+4. 政策文件 (Policy Document)
+5. 法规标准 (Regulation/Standard)
 
-            文件夹列表:
-            {json.dumps([{'name': f['name'], 'path': f['path']} for f in sample_folders], ensure_ascii=False, indent=2)}
-
-            请以JSON格式返回分类结果，格式为:
-            {{
-                "类别1": [文件夹索引列表],
-                "类别2": [文件夹索引列表],
-                ...
-            }}
-            其中文件夹索引是文件夹在提供的列表中的位置（从0开始）。
-
-            请确保创建的类别数量在3-7个之间，并且每个类别都有明确的主题。
-            """
-            
-            # 准备请求数据
-            request_data = {
-                "model": "deepseek-chat",
-                "messages": [
-                    {"role": "system", "content": "你是一个专业的文件分类助手，擅长根据文件夹名称和路径对文件夹进行语义分类。"},
-                    {"role": "user", "content": prompt}
-                ],
-                "temperature": 0.2
-            }
-            
-            # 创建客户端实例
+只能用这五个类别，不能有其他类别。请用如下JSON格式返回：
+{{
+  "学术论文": [文件索引列表],
+  "调查报告": [文件索引列表],
+  "专业书籍": [文件索引列表],
+  "政策文件": [文件索引列表],
+  "法规标准": [文件索引列表]
+}}
+文件列表如下：
+{json.dumps([{'name': f['name'], 'path': f['path']} for f in sample_folders], ensure_ascii=False, indent=2)}
+"""
             client = OpenAI(api_key=api_key, base_url="https://api.deepseek.com/v1")
-            
-            # 发送请求
-            try:
-                response = client.chat.completions.create(
+            response = await asyncio.to_thread(
+                client.chat.completions.create,
                     model="deepseek-chat",
                     messages=[
-                        {"role": "system", "content": "你是一个专业的文件分类助手，擅长根据文件夹名称和路径对文件夹进行语义分类。"},
+                    {"role": "system", "content": "你是一个文件分类专家，只能用五个类别分类。"},
                         {"role": "user", "content": prompt}
                     ],
-                    temperature=0.2,
-                    stream=False
-                )
-                
-                # 提取模型回复
-                model_response = response.choices[0].message.content
-                print('model_response',model_response)
-            except Exception as e:
-                logger.error(f"Error in DeepSeek analysis: {e}")
-                raise
-
-            # 从回复中提取JSON部分
+                temperature=0.2
+            )
+            model_response = response.choices[0].message.content
             json_match = re.search(r'```json\s*([\s\S]*?)\s*```', model_response)
-            if json_match:
-                json_str = json_match.group(1)
-            else:
-                json_str = model_response
-            
-            # 尝试解析JSON
+            json_str = json_match.group(1) if json_match else model_response
             try:
-                # 清理JSON字符串，移除可能的非JSON内容
+                category_indices = json.loads(json_str)
+            except Exception:
+                # 尝试修正格式
                 json_str = re.sub(r'[^\{\}\[\]\,\:\"\d\s\w\.\-\_\u4e00-\u9fa5]', '', json_str)
                 category_indices = json.loads(json_str)
-            except json.JSONDecodeError:
-                logger.error(f"Failed to parse JSON from model response: {model_response}")
-                raise Exception("Failed to parse JSON from model response")
-            
-            # 将索引映射回文件夹对象
-            categories = {}
-            for category, indices in category_indices.items():
-                categories[category] = []
+            # 保证五大类都存在
+            fixed_categories = ["学术论文", "调查报告", "专业书籍", "政策文件", "法规标准"]
+            categories = {cat: [] for cat in fixed_categories}
+            assigned_indices = set()
+            for cat in fixed_categories:
+                indices = category_indices.get(cat, [])
                 for idx in indices:
                     if 0 <= idx < len(sample_folders):
-                        # 找到原始文件夹对象
-                        folder_name = sample_folders[idx]['name']
-                        # 将所有具有相同或相似名称的文件夹添加到此类别
-                        for folder in folder_info:
-                            if folder['name'] == folder_name or folder['name'].lower() in folder_name.lower() or folder_name.lower() in folder['name'].lower():
-                                categories[category].append(folder)
-            
-            # 处理未分类的文件夹
-            all_categorized_folders = set()
-            for folders in categories.values():
-                for folder in folders:
-                    all_categorized_folders.add(folder['path'])
-            
-            uncategorized = []
-            for folder in folder_info:
-                if folder['path'] not in all_categorized_folders:
-                    uncategorized.append(folder)
-            
-            # 如果有未分类的文件夹，添加"其他文件夹"类别
-            if uncategorized:
-                categories["其他文件夹"] = uncategorized
-            
+                        categories[cat].append(sample_folders[idx])
+                        assigned_indices.add(idx)
+            # 只保留五大类中被分配的文件，未分配的文件直接丢弃
             return categories
         except Exception as e:
-            logger.error(f"Error in DeepSeek analysis: {e}")
+            logger.error(f"Error in DeepSeek analysis: {e}", exc_info=True)
             raise
+
+

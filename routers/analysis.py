@@ -84,45 +84,38 @@ async def get_analysis_progress(task_id: str):
 async def get_analysis_output():
     """获取分析结果"""
     try:
-      
-        print("/output",ResourceService._auto_analysis_running)
-        # 如果分析未运行，则启动新的分析任务
-        if not ResourceService._auto_analysis_running:
-            logger.info("Analysis not running, starting new analysis task")
-            # 创建异步任务并保存任务引用
-            asyncio.create_task(ResourceService.auto_analyze_local_directories())
-            # 给任务一点时间开始执行
-            await asyncio.sleep(0.1)
-            
-            # 再次检查运行标志，确认任务已启动
-            if ResourceService._auto_analysis_running:
-                logger.info("Analysis task started successfully")
-            else:
-                logger.warning("Analysis task did not start properly")
-        
-        # 获取当前结果
-        result = await ResourceService.get_auto_analysis_result()
-        
-        # 获取分析进度
+        # 启动自动分析任务（如果未运行）
+        # if not ResourceService._auto_analysis_running:
+        #     logger.info("Analysis not running, starting new analysis task")
+        #     asyncio.create_task(ResourceService.auto_analyze_local_directories())
+        #     await asyncio.sleep(0.1)
+        asyncio.create_task(ResourceService.auto_analyze_local_directories())    
+        print("自动分析任务已启动",ResourceService._auto_analysis_running)
+        # 查询数据库中最新的自动分析任务
+        from services.database import Task
+        from datetime import datetime, timedelta
+
+        # 查找24小时内最新的自动分析任务
+        task = await Task.find_one(
+            Task.task_type == "auto_resource_analysis",
+            sort=[("end_time", -1)]
+        )
+
+        result = None
         analysis_progress = {
             "is_running": ResourceService._auto_analysis_running,
-            "progress": 0
+            "progress": 0,
+            "status": "not_started"
         }
-        
-        # 如果有正在运行的任务，获取其进度
-        if ResourceService._auto_analysis_running:
-            # 查找与自动分析相关的任务
-            for task_id, task in ResourceService._analysis_tasks.items():
-                if hasattr(task, 'is_auto_analysis') and task.is_auto_analysis:
-                    analysis_progress["progress"] = task.progress
-                    analysis_progress["status"] = task.status
-                    break
-            
-            logger.info(f"Analysis progress: {analysis_progress}")
-        
+
+        if task:
+            result = task.result.get("categories") if task.result else None
+            analysis_progress["progress"] = task.progress
+            analysis_progress["status"] = task.status
+
         return {
-            "code": 200,  # 使用202 Accepted状态码表示请求已接受但处理尚未完成
-            "message": "Analysis started, please try again later",
+            "code": 200,
+            "message": "Analysis started, please try again later" if analysis_progress["status"] != "completed" else "Analysis completed",
             "data": result,
             "analysis_progress": analysis_progress
         }
