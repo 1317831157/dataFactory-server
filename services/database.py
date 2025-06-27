@@ -5,7 +5,7 @@ from typing import List, Dict, Any
 from datetime import datetime
 import logging
 from services.alert_service import Alert
-
+from models.paper import Paper
 logger = logging.getLogger(__name__)
 
 # --- 1. 数据模型定义 (Models) ---
@@ -112,7 +112,8 @@ async def init_db():
                 DataSource,
                 AnalysisResult,
                 Task,
-                Alert
+                Alert,
+                Paper
             ]
         )
         logger.info("Successfully connected to MongoDB and initialized Beanie!")

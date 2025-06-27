@@ -85,11 +85,11 @@ async def get_analysis_output():
     """获取分析结果"""
     try:
         # 启动自动分析任务（如果未运行）
-        # if not ResourceService._auto_analysis_running:
-        #     logger.info("Analysis not running, starting new analysis task")
-        #     asyncio.create_task(ResourceService.auto_analyze_local_directories())
-        #     await asyncio.sleep(0.1)
-        asyncio.create_task(ResourceService.auto_analyze_local_directories())    
+        if not ResourceService._auto_analysis_running:
+            logger.info("Analysis not running, starting new analysis task")
+            asyncio.create_task(ResourceService.auto_analyze_local_directories())
+            await asyncio.sleep(0.1)
+        # asyncio.create_task(ResourceService.auto_analyze_local_directories())    
         print("自动分析任务已启动",ResourceService._auto_analysis_running)
         # 查询数据库中最新的自动分析任务
         from services.database import Task

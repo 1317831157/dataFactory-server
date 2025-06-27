@@ -8,7 +8,7 @@ from contextlib import asynccontextmanager
 from services.init_services import initialize_services
 from services.database import init_db
 from routers.data_factory_api import router as data_factory_router
-
+from routers import processing_db
 # 添加当前目录到Python路径
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
@@ -86,9 +86,18 @@ except ImportError as e:
 try:
     from routers.dashboard import router as dashboard_router
     app.include_router(dashboard_router)
+    app.include_router(processing_db.router)
     logger.info(f"Registered dashboard router with routes: {[route.path for route in dashboard_router.routes]}")
 except ImportError as e:
     logger.error(f"Failed to import dashboard router: {e}")
+
+# 导入数据分析模态框路由
+try:
+    from routers.data_analysis_modal import router as data_analysis_modal_router
+    app.include_router(data_analysis_modal_router, prefix="", tags=["数据分析模态框"])
+    logger.info("Registered data analysis modal router")
+except ImportError as e:
+    logger.error(f"Failed to import data analysis modal router: {e}")
 
 # 注册数据工厂API路由
 app.include_router(data_factory_router, prefix="", tags=["数据工厂"])
@@ -107,7 +116,7 @@ if __name__ == "__main__":
     uvicorn.run(
         "main:app", 
         host="0.0.0.0", 
-        port=8001, 
+        port=8000, 
         reload=True,
         reload_dirs=[current_dir]  # 只监视当前目录
     )

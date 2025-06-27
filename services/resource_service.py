@@ -22,7 +22,6 @@ import re
 from bson import ObjectId
 import concurrent.futures
 import multiprocessing
-
 # 导入新的数据库模型和 pymongo 操作
 from services.database import DataSource, Task
 from pymongo import UpdateOne
@@ -36,12 +35,24 @@ def collect_files_mp(base_dir):
     try:
         for root, _, files in os.walk(base_dir):
             for file in files:
-                if file.lower().endswith((".pdf", ".json")):
+                # ".json"
+                if file.lower().endswith((".pdf")):
                     result.append(os.path.join(root, file))
     except Exception as e:
         print(f"Error walking {base_dir}: {e}")
     print(f"Finish scanning: {base_dir}, found {len(result)} files")
     return result
+
+def get_all_dirs(base_dirs, max_depth=1):
+    # 递归收集所有子目录，限制最大深度
+    all_dirs = []
+    for base in base_dirs:
+        for root, dirs, _ in os.walk(base):
+            depth = root[len(base):].count(os.sep)
+            if depth <= max_depth:
+                print('root',root)
+                all_dirs.append(root)
+    return all_dirs
 
 class ResourceService:
     """资源服务类 - 使用MongoDB进行任务管理"""
@@ -375,45 +386,44 @@ class ResourceService:
             }})
 
     @staticmethod
-    async def auto_analyze_local_directories():
-        """递归遍历所有目录，只收集 pdf 和 json 文件，LLM 分类，结果入库（分块递归+多进程优化）"""
+    async def auto_analyze_local_directories(base_dir="D:\\pdf"):
+        """递归遍历指定目录，只收集 pdf 和 json 文件，LLM 分类，结果入库（分块递归+多进程优化+动态进度日志）"""
         if ResourceService._auto_analysis_running:
             logger.info("Auto analysis already running, skipping")
             return
         try:
             ResourceService._auto_analysis_running = True
-            logger.info("Starting automatic analysis of local directories (recursive, pdf/json only, multiprocess)")
+            logger.info("Starting automatic analysis of local directories (recursive, pdf/json only, multiprocess, fine-grained)")
 
             import multiprocessing
-            home_dir = os.path.expanduser("~")
-            drive_dirs = [f"{d}:\\" for d in "DEFGHIJKLMNOPQRSTUVWXYZ" if os.path.exists(f"{d}:\\")]
-            scan_dirs = drive_dirs if drive_dirs else [home_dir]
+            # 新增：如果传入 base_dir，则只扫描该目录，否则用原有逻辑
+            if base_dir and os.path.exists(base_dir):
+                scan_dirs = [base_dir]
+            else:
+                home_dir = os.path.expanduser("~")
+                drive_dirs = [f"{d}:\\" for d in "DEFGHIJKLMNOPQRSTUVWXYZ" if os.path.exists(f"{d}:\\")]
+                scan_dirs = drive_dirs if drive_dirs else [home_dir]
             common_dirs = [d for d in scan_dirs if not d.startswith("C:")]
-
-            # 先收集所有盘符和一级子目录
-            all_start_dirs = []
-            for base in common_dirs:
-                all_start_dirs.append(base)
-                try:
-                    with os.scandir(base) as entries:
-                        for entry in entries:
-                            if entry.is_dir() and not entry.name.startswith('.'):
-                                all_start_dirs.append(entry.path)
-                except Exception as e:
-                    logger.warning(f"Error scanning {base}: {e}")
-
-            # 用多进程池同步收集，避免与 asyncio 混用导致卡死
+            print('2312',common_dirs)
+            # 递归收集所有子目录（如到2级）
+            all_start_dirs = get_all_dirs(common_dirs, max_depth=2)
+            logger.info(f"Total start dirs to scan: {len(all_start_dirs)}")
+            print('all_start_dirs',all_start_dirs)
+            # 用多进程池动态收集，主进程持续输出进度
             all_files = []
             if all_start_dirs:
                 with multiprocessing.get_context("spawn").Pool(processes=min(16, os.cpu_count() or 1)) as pool:
-                    results = pool.map(collect_files_mp, all_start_dirs)
-                    for files in results:
+                    total = len(all_start_dirs)
+                    for idx, files in enumerate(pool.imap_unordered(collect_files_mp, all_start_dirs), 1):
                         all_files.extend(files)
+                        if idx % 10 == 0 or idx == total:
+                            logger.info(f"已完成 {idx}/{total} 个目录，累计收集文件数: {len(all_files)}")
             logger.info(f"Total pdf/json files collected文件数量: {len(all_files)}")
-
+            print('file_dicts',all_files)
             # 2. LLM 分类（失败则本地规则）
             try:
-                categories = await ResourceService._analyze_with_deepseek(all_files)
+                file_dicts = [{'name': os.path.basename(f), 'path': f} for f in all_files]
+                categories = await ResourceService._analyze_with_deepseek(file_dicts)
             except Exception as e:
                 logger.warning(f"DeepSeek analysis failed: {e}, falling back to basic categorization")
                 from services.alert_service import AlertService
@@ -422,7 +432,9 @@ class ResourceService:
                     level="warning",
                     extra={"task_type": "auto_resource_analysis"}
                 )
-                categories = ResourceService._smart_categorize_folders(all_files)
+                categories = ResourceService._smart_categorize_folders(
+                    [{'name': os.path.basename(f), 'path': f} for f in all_files]
+                )
 
             # 3. 整理分类结果
             result = [
@@ -431,7 +443,7 @@ class ResourceService:
                  "files": files[:50]}
                 for i, (cat, files) in enumerate(categories.items())
             ]
-
+            # print('result',result)
             # 4. 写入数据库
             from services.alert_service import AlertService
             existing_task = await Task.find_one(Task.task_type == "auto_resource_analysis")
@@ -448,6 +460,14 @@ class ResourceService:
                 new_task = Task(task_type="auto_resource_analysis", status="completed", start_time=datetime.now(), end_time=datetime.now(), result={"categories": result})
                 await new_task.insert()
             logger.info("Auto analysis completed and categories saved to DB.")
+            # 动态导入，避免循环依赖
+            try:
+                from services.auto_paper_import_service import AutoPaperImportService
+                imported_count = await AutoPaperImportService.import_valid_papers_from_auto_analysis()
+                logger.info(f"自动分析后已导入 {imported_count} 篇有效论文。")
+            except Exception as e:
+                logger.error(f"自动导入有效论文失败: {e}")
+
         except Exception as e:
             logger.error(f"Error in automatic analysis: {e}")
             from services.alert_service import AlertService
@@ -553,9 +573,13 @@ class ResourceService:
             for cat in fixed_categories:
                 indices = category_indices.get(cat, [])
                 for idx in indices:
-                    if 0 <= idx < len(sample_folders):
-                        categories[cat].append(sample_folders[idx])
-                        assigned_indices.add(idx)
+                    try:
+                        idx_int = int(idx)
+                    except Exception:
+                        continue
+                    if 0 <= idx_int < len(sample_folders):
+                        categories[cat].append(sample_folders[idx_int])
+                        assigned_indices.add(idx_int)
             # 只保留五大类中被分配的文件，未分配的文件直接丢弃
             return categories
         except Exception as e:
