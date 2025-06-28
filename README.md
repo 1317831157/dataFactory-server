@@ -30,7 +30,7 @@ cp .env
 2. 编辑 `.env` 文件，配置必要参数：
 
 ```env
-# 数据分析基础目录
+# 数据分析基础目录(根据实际情况修改)
 BASE_PDF_DIR=D:\pdf
 
 # 数据库配置
@@ -40,7 +40,7 @@ MONGO_HOST=localhost
 MONGO_PORT=27017
 DB_NAME=data_factory
 
-# DeepSeek API配置
+# DeepSeek API配置(需配置密钥)
 DEEPSEEK_API_KEY=your_api_key_here
 ```
 
