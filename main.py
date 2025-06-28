@@ -5,10 +5,11 @@ import os
 import logging
 import sys
 from contextlib import asynccontextmanager
-from services.init_services import initialize_services
+from services.init_services import initialize_services, cleanup_services
 from services.database import init_db
 from routers.data_factory_api import router as data_factory_router
 from routers import processing_db
+from routers import data_display_modal_api 
 # 添加当前目录到Python路径
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
@@ -30,6 +31,7 @@ async def lifespan(app: FastAPI):
     yield
     # 关闭时执行
     logger.info("Application shutdown: cleaning up resources...")
+    await cleanup_services()
 
 # 导入路由
 try:
@@ -87,6 +89,8 @@ try:
     from routers.dashboard import router as dashboard_router
     app.include_router(dashboard_router)
     app.include_router(processing_db.router)
+    app.include_router(data_display_modal_api.router)
+    
     logger.info(f"Registered dashboard router with routes: {[route.path for route in dashboard_router.routes]}")
 except ImportError as e:
     logger.error(f"Failed to import dashboard router: {e}")
@@ -98,6 +102,22 @@ try:
     logger.info("Registered data analysis modal router")
 except ImportError as e:
     logger.error(f"Failed to import data analysis modal router: {e}")
+
+# 导入数据展示模态框路由
+try:
+    from routers.data_display_modal import router as data_display_modal_router
+    app.include_router(data_display_modal_router, prefix="", tags=["数据展示模态框"])
+    logger.info("Registered data display modal router")
+except ImportError as e:
+    logger.error(f"Failed to import data display modal router: {e}")
+
+# 导入数据展示模态框API路由
+try:
+    from routers.data_display_modal_api import router as data_display_modal_api_router
+    app.include_router(data_display_modal_api_router, prefix="", tags=["数据展示模态框API"])
+    logger.info("Registered data display modal API router")
+except ImportError as e:
+    logger.error(f"Failed to import data display modal API router: {e}")
 
 # 注册数据工厂API路由
 app.include_router(data_factory_router, prefix="", tags=["数据工厂"])
@@ -116,7 +136,7 @@ if __name__ == "__main__":
     uvicorn.run(
         "main:app", 
         host="0.0.0.0", 
-        port=8000, 
+        port=8001, 
         reload=True,
         reload_dirs=[current_dir]  # 只监视当前目录
     )

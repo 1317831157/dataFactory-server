@@ -11,7 +11,7 @@ from pydantic import BaseModel, Field
 from services.resource_service import ResourceService
 # 导入新的服务
 from services.source_analysis_service import SourceAnalysisService
-from services.database import AnalysisResult, AnalyzedFolder, AnalyzedFile # 导入模型用于响应
+from services.database import AnalysisResult, AnalyzedFolder, AnalyzedFile, Task # 导入模型用于响应
 
 # 设置日志
 logger = logging.getLogger(__name__)
@@ -115,19 +115,28 @@ async def start_crawling(request: CrawlRequest, background_tasks: BackgroundTask
         logger.error(f"Error starting analysis: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
-# @router.post("/collection/crawl/stop")
-# async def stop_crawling():
-#     """
-#     停止数据爬取 (功能已停用)。
-#     在新的持久化架构中，安全地停止一个正在遍历本地文件的任务是复杂的，
-#     需要引入更重量级的任务队列（如Celery）和进程管理。
-#     因此暂时停用此接口，以避免不可预期的行为。
-#     """
-#     return {
-#         "code": 503,
-#         "message": "Service Unavailable",
-#         "data": {"message": "此功能已停用，无法安全地中断正在进行的磁盘扫描任务。"}
-#     }
+@router.post("/collection/crawl/stop")
+async def stop_crawling():
+    """
+    停止数据爬取。
+    通过设置停止标志和更新数据库任务状态来安全地停止正在进行的分析任务。
+    """
+    try:
+        # 调用新的停止服务
+        result = await stop_crawling_service()
+
+        return {
+            "code": 200,
+            "message": "success",
+            "data": result
+        }
+    except Exception as e:
+        logger.error(f"Error stopping crawling: {e}")
+        return {
+            "code": 500,
+            "message": "Internal Server Error",
+            "data": {"message": f"停止爬取任务时发生错误: {str(e)}"}
+        }
 
 @router.get("/collection/results", response_model_exclude_none=True)
 async def get_crawl_results(

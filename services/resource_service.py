@@ -22,7 +22,6 @@ import re
 from bson import ObjectId
 import concurrent.futures
 import multiprocessing
-# 导入新的数据库模型和 pymongo 操作
 from services.database import DataSource, Task
 from pymongo import UpdateOne
 
@@ -50,7 +49,6 @@ def get_all_dirs(base_dirs, max_depth=1):
         for root, dirs, _ in os.walk(base):
             depth = root[len(base):].count(os.sep)
             if depth <= max_depth:
-                print('root',root)
                 all_dirs.append(root)
     return all_dirs
 
@@ -404,11 +402,9 @@ class ResourceService:
                 drive_dirs = [f"{d}:\\" for d in "DEFGHIJKLMNOPQRSTUVWXYZ" if os.path.exists(f"{d}:\\")]
                 scan_dirs = drive_dirs if drive_dirs else [home_dir]
             common_dirs = [d for d in scan_dirs if not d.startswith("C:")]
-            print('2312',common_dirs)
             # 递归收集所有子目录（如到2级）
             all_start_dirs = get_all_dirs(common_dirs, max_depth=2)
             logger.info(f"Total start dirs to scan: {len(all_start_dirs)}")
-            print('all_start_dirs',all_start_dirs)
             # 用多进程池动态收集，主进程持续输出进度
             all_files = []
             if all_start_dirs:
@@ -419,7 +415,6 @@ class ResourceService:
                         if idx % 10 == 0 or idx == total:
                             logger.info(f"已完成 {idx}/{total} 个目录，累计收集文件数: {len(all_files)}")
             logger.info(f"Total pdf/json files collected文件数量: {len(all_files)}")
-            print('file_dicts',all_files)
             # 2. LLM 分类（失败则本地规则）
             try:
                 file_dicts = [{'name': os.path.basename(f), 'path': f} for f in all_files]
@@ -443,7 +438,6 @@ class ResourceService:
                  "files": files[:50]}
                 for i, (cat, files) in enumerate(categories.items())
             ]
-            # print('result',result)
             # 4. 写入数据库
             from services.alert_service import AlertService
             existing_task = await Task.find_one(Task.task_type == "auto_resource_analysis")

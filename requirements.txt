@@ -4,3 +4,4 @@ pydantic==2.8.0
 python-multipart==0.0.9
 beanie==1.26.0
 motor==3.7.1
+watchdog==3.0.0
