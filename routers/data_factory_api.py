@@ -56,6 +56,96 @@ class AnalysisTaskRequest(BaseModel):
     dataSource: str
     parameters: Dict[str, Any]
 
+# 停止爬取服务函数
+async def stop_crawling_service() -> Dict[str, Any]:
+    """
+    停止数据爬取服务函数。
+    通过设置停止标志和更新数据库任务状态来安全地停止正在进行的分析任务。
+    """
+    try:
+        stopped_tasks = []
+
+        # 1. 停止自动分析任务
+        if ResourceService._auto_analysis_running:
+            logger.info("Stopping auto analysis task")
+            ResourceService._auto_analysis_running = False
+            stopped_tasks.append("auto_analysis")
+
+            # 更新数据库中正在运行的自动分析任务状态
+            try:
+                running_auto_tasks = await Task.find({
+                    "task_type": "auto_resource_analysis",
+                    "status": "running"
+                }).to_list()
+
+                for task in running_auto_tasks:
+                    await task.update({"$set": {
+                        "status": "cancelled",
+                        "error": "Task stopped by user",
+                        "end_time": datetime.now()
+                    }})
+                    logger.info(f"Cancelled auto analysis task: {task.id}")
+
+            except Exception as e:
+                logger.error(f"Error updating auto analysis tasks: {e}")
+
+        # 2. 停止源分析任务
+        try:
+            running_source_tasks = await Task.find({
+                "task_type": "source_analysis",
+                "status": {"$in": ["pending", "running"]}
+            }).to_list()
+
+            for task in running_source_tasks:
+                await task.update({"$set": {
+                    "status": "cancelled",
+                    "error": "Task stopped by user",
+                    "end_time": datetime.now()
+                }})
+                stopped_tasks.append(f"source_analysis_{task.id}")
+                logger.info(f"Cancelled source analysis task: {task.id}")
+
+        except Exception as e:
+            logger.error(f"Error stopping source analysis tasks: {e}")
+
+        # 3. 停止资源分析任务
+        try:
+            running_resource_tasks = await Task.find({
+                "task_type": "resource_analysis",
+                "status": {"$in": ["pending", "running"]}
+            }).to_list()
+
+            for task in running_resource_tasks:
+                await task.update({"$set": {
+                    "status": "cancelled",
+                    "error": "Task stopped by user",
+                    "end_time": datetime.now()
+                }})
+                stopped_tasks.append(f"resource_analysis_{task.id}")
+                logger.info(f"Cancelled resource analysis task: {task.id}")
+
+        except Exception as e:
+            logger.error(f"Error stopping resource analysis tasks: {e}")
+
+        # 返回结果
+        if stopped_tasks:
+            message = f"已停止 {len(stopped_tasks)} 个任务"
+            logger.info(f"Successfully stopped tasks: {stopped_tasks}")
+        else:
+            message = "没有正在运行的任务需要停止"
+            logger.info("No running tasks found to stop")
+
+        return {
+            "status": "success",
+            "message": message,
+            "stopped_tasks": stopped_tasks,
+            "stopped_count": len(stopped_tasks)
+        }
+
+    except Exception as e:
+        logger.error(f"Error in stop_crawling_service: {e}")
+        raise e
+
 # 数据采集相关接口
 @router.get("/collection/statistics", response_model=DataSourceStatistics)
 async def get_source_statistics():

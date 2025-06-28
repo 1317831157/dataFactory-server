@@ -84,17 +84,8 @@ async def get_analysis_progress(task_id: str):
 async def get_analysis_output():
     """获取分析结果"""
     try:
-        # 启动自动分析任务（如果未运行）
-        if not ResourceService._auto_analysis_running:
-            logger.info("Analysis not running, starting new analysis task")
-            asyncio.create_task(ResourceService.auto_analyze_local_directories())
-            await asyncio.sleep(0.1)
-        # asyncio.create_task(ResourceService.auto_analyze_local_directories())    
-        print("自动分析任务已启动",ResourceService._auto_analysis_running)
         # 查询数据库中最新的自动分析任务
         from services.database import Task
-        from datetime import datetime, timedelta
-
         # 查找24小时内最新的自动分析任务
         task = await Task.find_one(
             Task.task_type == "auto_resource_analysis",
@@ -112,6 +103,13 @@ async def get_analysis_output():
             result = task.result.get("categories") if task.result else None
             analysis_progress["progress"] = task.progress
             analysis_progress["status"] = task.status
+
+        # 只有在没有数据且未运行时才启动分析任务
+        if not result and not ResourceService._auto_analysis_running:
+            logger.info("No analysis data found, starting new analysis task")
+            asyncio.create_task(ResourceService.auto_analyze_local_directories())
+            await asyncio.sleep(0.1)
+            print("自动分析任务已启动", ResourceService._auto_analysis_running)
 
         return {
             "code": 200,

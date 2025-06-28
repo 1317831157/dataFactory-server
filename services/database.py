@@ -78,14 +78,12 @@ class Task(Document):
 # --- 2. 数据库客户端初始化 ---
 # 数据库连接配置
 
-# TODO: 在生产环境中，强烈建议使用环境变量来管理这些敏感信息
-MONGO_USER = "user"
-MONGO_PASSWORD = "password"
-MONGO_HOST = "localhost"
-DB_NAME = "data_factory"
+# 导入配置
+from config import config
 
-# 构建数据库连接字符串
-DATABASE_URI = f"mongodb://{MONGO_USER}:{MONGO_PASSWORD}@{MONGO_HOST}:27017"
+# 使用配置中的数据库连接信息
+DATABASE_URI = config.DATABASE_URI
+DB_NAME = config.DB_NAME
 
 # 创建异步客户端
 client = motor.motor_asyncio.AsyncIOMotorClient(

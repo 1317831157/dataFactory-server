@@ -3,6 +3,8 @@ import logging
 from services.hourly_stats_service import HourlyStatsService
 from services.alert_service import AlertService
 from services.directory_monitor_service import start_directory_monitoring, stop_directory_monitoring
+# 导入配置
+from config import config
 
 # 配置日志
 logging.basicConfig(level=logging.INFO)
@@ -20,8 +22,8 @@ async def initialize_services():
 
     # 初始化目录监听服务
     try:
-        # 可以从配置文件或环境变量读取监听目录
-        monitor_dirs = ["D:\\pdf"]  # 默认监听目录
+        # 从配置文件读取监听目录
+        monitor_dirs = config.MONITOR_DIRS
         await start_directory_monitoring(monitor_dirs)
         logger.info("Directory monitoring service started successfully")
     except Exception as e:

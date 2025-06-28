@@ -12,6 +12,8 @@ from datetime import datetime, timedelta
 from watchdog.observers import Observer
 from watchdog.events import FileSystemEventHandler
 from pathlib import Path
+# 导入配置
+from config import config
 
 logger = logging.getLogger(__name__)
 
@@ -36,7 +38,7 @@ class DirectoryMonitorService:
         
         # 默认监听目录
         if base_dirs is None:
-            base_dirs = ["D:\\pdf"]
+            base_dirs = config.MONITOR_DIRS
             
         # 确保目录存在
         valid_dirs = []

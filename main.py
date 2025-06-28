@@ -9,7 +9,6 @@ from services.init_services import initialize_services, cleanup_services
 from services.database import init_db
 from routers.data_factory_api import router as data_factory_router
 from routers import processing_db
-from routers import data_display_modal_api 
 # 添加当前目录到Python路径
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
@@ -84,13 +83,17 @@ try:
 except ImportError as e:
     logger.error(f"Failed to import resource router: {e}")
 
+# 注册 processing_db 路由
+try:
+    app.include_router(processing_db.router)
+    logger.info("Registered processing_db router with download functionality")
+except Exception as e:
+    logger.error(f"Failed to register processing_db router: {e}")
+
 # 导入新的仪表盘路由
 try:
     from routers.dashboard import router as dashboard_router
     app.include_router(dashboard_router)
-    app.include_router(processing_db.router)
-    app.include_router(data_display_modal_api.router)
-    
     logger.info(f"Registered dashboard router with routes: {[route.path for route in dashboard_router.routes]}")
 except ImportError as e:
     logger.error(f"Failed to import dashboard router: {e}")
@@ -103,14 +106,6 @@ try:
 except ImportError as e:
     logger.error(f"Failed to import data analysis modal router: {e}")
 
-# 导入数据展示模态框路由
-try:
-    from routers.data_display_modal import router as data_display_modal_router
-    app.include_router(data_display_modal_router, prefix="", tags=["数据展示模态框"])
-    logger.info("Registered data display modal router")
-except ImportError as e:
-    logger.error(f"Failed to import data display modal router: {e}")
-
 # 导入数据展示模态框API路由
 try:
     from routers.data_display_modal_api import router as data_display_modal_api_router
@@ -120,7 +115,7 @@ except ImportError as e:
     logger.error(f"Failed to import data display modal API router: {e}")
 
 # 注册数据工厂API路由
-app.include_router(data_factory_router, prefix="", tags=["数据工厂"])
+app.include_router(data_factory_router, prefix="/api", tags=["数据工厂"])
 
 @app.get("/")
 async def root():

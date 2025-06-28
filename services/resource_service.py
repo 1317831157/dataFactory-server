@@ -24,6 +24,8 @@ import concurrent.futures
 import multiprocessing
 from services.database import DataSource, Task
 from pymongo import UpdateOne
+# 导入配置
+from config import config
 
 # 配置日志
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
@@ -384,7 +386,7 @@ class ResourceService:
             }})
 
     @staticmethod
-    async def auto_analyze_local_directories(base_dir="D:\\pdf"):
+    async def auto_analyze_local_directories(base_dir=None):
         """递归遍历指定目录，只收集 pdf 和 json 文件，LLM 分类，结果入库（分块递归+多进程优化+动态进度日志）"""
         if ResourceService._auto_analysis_running:
             logger.info("Auto analysis already running, skipping")
@@ -394,13 +396,20 @@ class ResourceService:
             logger.info("Starting automatic analysis of local directories (recursive, pdf/json only, multiprocess, fine-grained)")
 
             import multiprocessing
-            # 新增：如果传入 base_dir，则只扫描该目录，否则用原有逻辑
+            # 新增：如果传入 base_dir，则只扫描该目录，否则使用配置中的默认目录
             if base_dir and os.path.exists(base_dir):
                 scan_dirs = [base_dir]
             else:
-                home_dir = os.path.expanduser("~")
-                drive_dirs = [f"{d}:\\" for d in "DEFGHIJKLMNOPQRSTUVWXYZ" if os.path.exists(f"{d}:\\")]
-                scan_dirs = drive_dirs if drive_dirs else [home_dir]
+                # 使用配置中的基础目录列表
+                config_dirs = config.BASE_PDF_DIRS
+                # 过滤出存在的目录
+                scan_dirs = [d for d in config_dirs if os.path.exists(d)]
+
+                # 如果配置的目录都不存在，则使用原有逻辑
+                if not scan_dirs:
+                    home_dir = os.path.expanduser("~")
+                    drive_dirs = [f"{d}:\\" for d in "DEFGHIJKLMNOPQRSTUVWXYZ" if os.path.exists(f"{d}:\\")]
+                    scan_dirs = drive_dirs if drive_dirs else [home_dir]
             common_dirs = [d for d in scan_dirs if not d.startswith("C:")]
             # 递归收集所有子目录（如到2级）
             all_start_dirs = get_all_dirs(common_dirs, max_depth=2)
@@ -516,7 +525,7 @@ class ResourceService:
     async def _analyze_with_deepseek(folder_info: List[Dict]) -> Dict[str, List[Dict]]:
         """使用DeepSeek大模型分析文件夹并生成五大固定分类"""
         try:
-            api_key = os.environ.get("DEEPSEEK_API_KEY", "sk-0c98c2a93954490aab152eeec9da1601")
+            api_key = config.DEEPSEEK_API_KEY
             if not api_key:
                 raise ValueError("DeepSeek API key not found")
             sample_size = min(100, len(folder_info))

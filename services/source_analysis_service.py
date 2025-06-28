@@ -235,7 +235,7 @@ class SourceAnalysisService:
                                 "file_count": file_count,
                                 "files": analyzed_files
                             })
-            print('analysis_result_list', analysis_result_list)
+            # print('analysis_result_list', analysis_result_list)
             # 4. 写入分析结果
             await AnalysisResult.find_one(AnalysisResult.source_type == source_type).upsert(
                 Set({

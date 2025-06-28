@@ -17,7 +17,7 @@ from enum import Enum
 # 配置日志
 logger = logging.getLogger(__name__)
 
-router = APIRouter(prefix="/api/analysis", tags=["数据分析模态框"])
+router = APIRouter(prefix="/analysis", tags=["数据分析模态框"])
 
 # ==================== 数据模型定义 ====================
 
@@ -1035,8 +1035,8 @@ async def simulate_classification_task(task_id: str, categories: List[str]):
                 }
             }
 
-        # 更新分类统计
-        if i > 50:
+        # 更新分类统计 - 从更早的阶段开始生成
+        if i > 30:
             task["categoryStats"] = generate_mock_category_stats(categories)
 
         await asyncio.sleep(0.05)  # 更快的更新频率以实现平滑效果
@@ -1047,6 +1047,10 @@ async def simulate_classification_task(task_id: str, categories: List[str]):
         task["progress"] = 100
         task["endTime"] = datetime.now().isoformat()
         task["duration"] = 5000  # 5秒
+
+        # 确保最终有分类统计数据
+        if not task.get("categoryStats"):
+            task["categoryStats"] = generate_mock_category_stats(categories)
 
         # 生成最终的混淆矩阵
         matrix = generate_mock_confusion_matrix(categories)
@@ -1163,14 +1167,20 @@ async def generate_confusion_matrix_chart(task_id: str):
 async def get_category_stats(task_id: str):
     """获取分类结果统计"""
     try:
+        logger.info(f"Getting category stats for task: {task_id}")
+
         if task_id not in classification_tasks:
+            logger.error(f"Task {task_id} not found in classification_tasks")
             raise HTTPException(status_code=404, detail="Task not found")
 
         task = classification_tasks[task_id]
+        logger.info(f"Task status: {task.get('status')}, progress: {task.get('progress')}")
 
         if not task.get("categoryStats"):
+            logger.warning(f"Category stats not available for task {task_id}")
             raise HTTPException(status_code=400, detail="Category stats not available yet")
 
+        logger.info(f"Returning category stats for task {task_id}")
         return {
             "code": 200,
             "message": "Success",
