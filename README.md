@@ -179,35 +179,6 @@ python clear/clear_database.py
 - `404`: 资源不存在
 - `500`: 服务器内部错误
 
-## 🛠️ 开发指南
-
-### 添加新的 API 接口
-
-1. 在 `routers/` 目录下创建或编辑路由文件
-2. 定义请求/响应模型
-3. 实现业务逻辑
-4. 在 `main.py` 中注册路由
-
-示例：
-
-```python
-from fastapi import APIRouter
-from pydantic import BaseModel
-
-router = APIRouter()
-
-class MyRequest(BaseModel):
-    name: str
-
-@router.post("/my-endpoint")
-async def my_endpoint(request: MyRequest):
-    return {
-        "code": 200,
-        "message": "success",
-        "data": {"result": f"Hello {request.name}"}
-    }
-```
-
 ### 添加新的服务
 
 1. 在 `services/` 目录下创建服务文件
