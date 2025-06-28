@@ -80,7 +80,7 @@ class Config:
     @property
     def DEEPSEEK_API_KEY(self) -> str:
         """DeepSeek API密钥"""
-        return os.environ.get('DEEPSEEK_API_KEY', 'sk-0c98c2a93954490aab152eeec9da1601')
+        return os.environ.get('DEEPSEEK_API_KEY', '')
     
     # 服务器配置
     @property
