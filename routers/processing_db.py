@@ -32,7 +32,7 @@ async def api_list_valid_papers(page: int = 1, pageSize: int = 10, sortBy: str =
     """
     try:
         papers, total = await processing_service.list_valid_papers(page, pageSize, sortBy, sortOrder)
-        return success({"data": papers, "page": page, "pageSize": pageSize, "total": total})
+        return success({"papers": papers, "total": total, "page": page, "pageSize": pageSize})
     except Exception as e:
         return fail(str(e))
 
@@ -71,7 +71,7 @@ async def api_list_formulas(page: int = 1, pageSize: int = 10):
     """
     try:
         formulas, total = await processing_service.list_formulas(page, pageSize)
-        return success({"data": formulas, "page": page, "pageSize": pageSize, "total": total})
+        return success({"data": formulas, "total": total, "page": page, "pageSize": pageSize})
     except Exception as e:
         return fail(str(e))
 

@@ -12,7 +12,7 @@ class Paper(Document):
     formulaCount: int
     abstract: str
     file_path:Optional[str] = None
-    topics: List[str]
+    topics: List[str] = Field(default_factory=list)
     image: Optional[str]
     type: str = Field(default="valid")
 

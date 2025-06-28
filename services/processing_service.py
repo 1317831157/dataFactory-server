@@ -23,7 +23,20 @@ async def list_valid_papers(page: int, page_size: int, sort_by: str = "timestamp
     total = await query.count()
     sort = [(sort_by, -1 if sort_order == "desc" else 1)] if sort_by else None
     papers = await query.sort(*sort).skip((page-1)*page_size).limit(page_size).to_list()
-    return [p.dict() for p in papers], total
+
+    # 清理数据，确保必要字段存在
+    cleaned_papers = []
+    for p in papers:
+        paper_dict = p.model_dump()
+        # 确保 topics 字段存在且为列表
+        if 'topics' not in paper_dict or paper_dict['topics'] is None:
+            paper_dict['topics'] = []
+        # 确保 authors 字段存在且为列表
+        if 'authors' not in paper_dict or paper_dict['authors'] is None:
+            paper_dict['authors'] = []
+        cleaned_papers.append(paper_dict)
+
+    return cleaned_papers, total
 
 async def detail_paper(paper_id: str) -> Optional[dict]:
     """
@@ -33,7 +46,7 @@ async def detail_paper(paper_id: str) -> Optional[dict]:
     """
     try:
         paper = await Paper.get(ObjectId(paper_id))
-        return paper.dict() if paper else None
+        return paper.model_dump() if paper else None
     except Exception:
         return None
 
@@ -50,7 +63,7 @@ async def list_formula_images(page: int, page_size: int, filters: Dict[str, Any]
     query = Formula.find(query_dict)
     total = await query.count()
     formulas = await query.skip((page-1)*page_size).limit(page_size).to_list()
-    return [f.dict() for f in formulas], total
+    return [f.model_dump() for f in formulas], total
 
 async def detail_formula(formula_id: str) -> Optional[dict]:
     """
@@ -60,7 +73,7 @@ async def detail_formula(formula_id: str) -> Optional[dict]:
     """
     try:
         formula = await Formula.get(ObjectId(formula_id))
-        return formula.dict() if formula else None
+        return formula.model_dump() if formula else None
     except Exception:
         return None
 
@@ -77,7 +90,7 @@ async def list_trash_data(page: int, page_size: int, filters: Dict[str, Any] = N
     query = Trash.find(query_dict)
     total = await query.count()
     trash = await query.skip((page-1)*page_size).limit(page_size).to_list()
-    return [t.dict() for t in trash], total
+    return [t.model_dump() for t in trash], total
 
 async def detail_trash(trash_id: str) -> Optional[dict]:
     """
@@ -87,7 +100,7 @@ async def detail_trash(trash_id: str) -> Optional[dict]:
     """
     try:
         trash = await Trash.get(ObjectId(trash_id))
-        return trash.dict() if trash else None
+        return trash.model_dump() if trash else None
     except Exception:
         return None
 

@@ -27,12 +27,19 @@ class DirectoryMonitorService:
         self.analysis_cooldown = timedelta(minutes=5)  # 分析冷却时间，避免频繁触发
         self.is_running = False
         self.monitored_directories: Set[str] = set()
+        self.main_loop = None  # 保存主事件循环引用
         
     async def start_monitoring(self, base_dirs: list = None):
         """开始监听目录"""
         if self.is_running:
             logger.info("Directory monitoring is already running")
             return
+
+        # 保存主事件循环引用
+        try:
+            self.main_loop = asyncio.get_running_loop()
+        except RuntimeError:
+            logger.warning("No running event loop found")
             
         self.is_running = True
         
@@ -62,14 +69,17 @@ class DirectoryMonitorService:
     async def stop_monitoring(self):
         """停止监听"""
         self.is_running = False
-        
+
         for path, observer in self.observers.items():
             observer.stop()
             observer.join()
             logger.info(f"Stopped monitoring: {path}")
-            
+
         self.observers.clear()
         self.monitored_directories.clear()
+
+        # 清理事件循环引用
+        self.main_loop = None
         logger.info("Directory monitoring stopped")
         
     async def _setup_directory_monitor(self, base_dir: str):
@@ -160,7 +170,28 @@ class DirectoryMonitorService:
             
         except Exception as e:
             logger.error(f"Failed to trigger auto analysis for {base_dir}: {e}")
-            
+
+    def _schedule_file_change_handler(self, base_dir: str):
+        """线程安全地调度文件变化处理器"""
+        try:
+            # 使用保存的主事件循环
+            if self.main_loop and not self.main_loop.is_closed():
+                # 定义一个安全的任务创建函数
+                def create_task_safely():
+                    try:
+                        if not self.main_loop.is_closed():
+                            asyncio.create_task(self._handle_file_change(base_dir))
+                    except Exception as e:
+                        logger.error(f"Error creating task: {e}")
+
+                # 使用主事件循环的线程安全方法
+                self.main_loop.call_soon_threadsafe(create_task_safely)
+            else:
+                logger.warning(f"Main event loop not available, skipping file change handler for {base_dir}")
+
+        except Exception as e:
+            logger.error(f"Error scheduling file change handler: {e}")
+
     def get_monitoring_status(self) -> Dict:
         """获取监听状态"""
         return {
@@ -216,8 +247,8 @@ class DirectoryEventHandler(FileSystemEventHandler):
         
         logger.debug(f"File {event_type}: {file_path}")
         
-        # 异步处理文件变化
-        asyncio.create_task(self.monitor_service._handle_file_change(self.base_dir))
+        # 使用线程安全的方式调度异步任务
+        self.monitor_service._schedule_file_change_handler(self.base_dir)
 
 
 # 全局监听服务实例

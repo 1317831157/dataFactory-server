@@ -65,6 +65,8 @@ app.add_middleware(
 # 注册路由
 try:
     app.include_router(analysis.router, prefix="", tags=["数据分析"])
+    # 注册数据工厂API路由
+    app.include_router(data_factory_router, prefix="", tags=["数据工厂"])
     logger.info("Registered analysis router")
 except AttributeError:
     logger.error("Failed to register analysis router: router attribute not found")
@@ -114,8 +116,7 @@ try:
 except ImportError as e:
     logger.error(f"Failed to import data display modal API router: {e}")
 
-# 注册数据工厂API路由
-app.include_router(data_factory_router, prefix="/api", tags=["数据工厂"])
+
 
 @app.get("/")
 async def root():
@@ -129,9 +130,9 @@ if __name__ == "__main__":
     # 启动服务器，只监视server目录下的变化
     current_dir = os.path.dirname(os.path.abspath(__file__))
     uvicorn.run(
-        "main:app", 
-        host="0.0.0.0", 
-        port=8001, 
+        "main:app",
+        host="0.0.0.0",
+        port=int(os.environ.get('SERVER_PORT', 8001)),
         reload=True,
         reload_dirs=[current_dir]  # 只监视当前目录
     )

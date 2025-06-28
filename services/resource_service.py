@@ -67,6 +67,9 @@ class ResourceService:
     _auto_analysis_time = None
     _auto_analysis_running = False
 
+    # 添加任务跟踪字典
+    _analysis_tasks = {}
+
     @staticmethod
     async def get_resource_data() -> list[ResourceItem]:
         """获取资源数据列表"""
@@ -395,6 +398,17 @@ class ResourceService:
             ResourceService._auto_analysis_running = True
             logger.info("Starting automatic analysis of local directories (recursive, pdf/json only, multiprocess, fine-grained)")
 
+            # 创建任务对象并添加到任务跟踪字典
+            task_id = str(uuid.uuid4())
+            task_obj = type('AnalysisTask', (), {
+                'id': task_id,
+                'is_auto_analysis': True,
+                'progress': 0,
+                'status': 'running',
+                'start_time': datetime.now()
+            })()
+            ResourceService._analysis_tasks[task_id] = task_obj
+
             import multiprocessing
             # 新增：如果传入 base_dir，则只扫描该目录，否则使用配置中的默认目录
             if base_dir and os.path.exists(base_dir):
@@ -424,10 +438,20 @@ class ResourceService:
                         if idx % 10 == 0 or idx == total:
                             logger.info(f"已完成 {idx}/{total} 个目录，累计收集文件数: {len(all_files)}")
             logger.info(f"Total pdf/json files collected文件数量: {len(all_files)}")
+
+            # 更新任务进度：文件收集完成
+            if 'task_obj' in locals():
+                task_obj.progress = 30
+                task_obj.status = 'analyzing'
+
             # 2. LLM 分类（失败则本地规则）
             try:
                 file_dicts = [{'name': os.path.basename(f), 'path': f} for f in all_files]
                 categories = await ResourceService._analyze_with_deepseek(file_dicts)
+
+                # 更新任务进度：分析完成
+                if 'task_obj' in locals():
+                    task_obj.progress = 70
             except Exception as e:
                 logger.warning(f"DeepSeek analysis failed: {e}, falling back to basic categorization")
                 from services.alert_service import AlertService
@@ -463,11 +487,22 @@ class ResourceService:
                 new_task = Task(task_type="auto_resource_analysis", status="completed", start_time=datetime.now(), end_time=datetime.now(), result={"categories": result})
                 await new_task.insert()
             logger.info("Auto analysis completed and categories saved to DB.")
+
+            # 更新任务进度：数据保存完成
+            if 'task_obj' in locals():
+                task_obj.progress = 90
+
             # 动态导入，避免循环依赖
             try:
                 from services.auto_paper_import_service import AutoPaperImportService
                 imported_count = await AutoPaperImportService.import_valid_papers_from_auto_analysis()
                 logger.info(f"自动分析后已导入 {imported_count} 篇有效论文。")
+
+                # 更新任务进度：全部完成
+                if 'task_obj' in locals():
+                    task_obj.progress = 100
+                    task_obj.status = 'completed'
+
             except Exception as e:
                 logger.error(f"自动导入有效论文失败: {e}")
 
@@ -481,6 +516,12 @@ class ResourceService:
             )
         finally:
             ResourceService._auto_analysis_running = False
+            # 清理任务跟踪
+            if 'task_id' in locals():
+                if task_id in ResourceService._analysis_tasks:
+                    ResourceService._analysis_tasks[task_id].status = 'completed'
+                    # 可以选择保留任务一段时间或立即删除
+                    # del ResourceService._analysis_tasks[task_id]
             logger.info("Auto analysis completed, reset running flag.")
 
     @staticmethod
@@ -551,15 +592,20 @@ class ResourceService:
 {json.dumps([{'name': f['name'], 'path': f['path']} for f in sample_folders], ensure_ascii=False, indent=2)}
 """
             client = OpenAI(api_key=api_key, base_url="https://api.deepseek.com/v1")
-            response = await asyncio.to_thread(
-                client.chat.completions.create,
+
+            # 使用线程池执行器来避免事件循环问题
+            import concurrent.futures
+            with concurrent.futures.ThreadPoolExecutor() as executor:
+                future = executor.submit(
+                    client.chat.completions.create,
                     model="deepseek-chat",
                     messages=[
-                    {"role": "system", "content": "你是一个文件分类专家，只能用五个类别分类。"},
+                        {"role": "system", "content": "你是一个文件分类专家，只能用五个类别分类。"},
                         {"role": "user", "content": prompt}
                     ],
-                temperature=0.2
-            )
+                    temperature=0.2
+                )
+                response = await asyncio.wrap_future(future)
             model_response = response.choices[0].message.content
             json_match = re.search(r'```json\s*([\s\S]*?)\s*```', model_response)
             json_str = json_match.group(1) if json_match else model_response
