@@ -563,8 +563,220 @@ class ResourceService:
         return None
 
     @staticmethod
+    async def _analyze_with_ollama(folder_info: List[Dict]) -> Dict[str, List[Dict]]:
+        """使用Ollama本地大模型分析文件夹并生成五大固定分类"""
+        try:
+            ollama_base_url = config.OLLAMA_BASE_URL
+            ollama_model = config.OLLAMA_MODEL
+
+            logger.info(f"Starting Ollama analysis with model: {ollama_model}, URL: {ollama_base_url}")
+
+            # 保持完整的样本数量，不减少
+            sample_size = min(100, len(folder_info))
+            sample_folders = random.sample(folder_info, sample_size)
+            logger.info(f"Processing {sample_size} sample files")
+
+            # 分批处理以提高性能，但保持完整分析
+            batch_size = 25  # 每批处理25个文件，减少单次请求的复杂度
+            all_categories = {"学术论文": [], "调查报告": [], "专业书籍": [], "政策文件": [], "法规标准": []}
+
+            for batch_start in range(0, len(sample_folders), batch_size):
+                batch_end = min(batch_start + batch_size, len(sample_folders))
+                batch_folders = sample_folders[batch_start:batch_end]
+
+                logger.info(f"Processing batch {batch_start//batch_size + 1}/{(len(sample_folders) + batch_size - 1)//batch_size}, files {batch_start}-{batch_end-1}")
+
+                # 保持完整的prompt，不简化
+                prompt = f"""
+你是一个文件分类专家。请根据下列文件的文件名（和路径），将它们严格分类到以下五个类别之一：
+1. 学术论文 (Academic Paper)
+2. 调查报告 (Survey Report)
+3. 专业书籍 (Professional Book)
+4. 政策文件 (Policy Document)
+5. 法规标准 (Regulation/Standard)
+
+只能用这五个类别，不能有其他类别。请用如下JSON格式返回：
+{{
+  "学术论文": [文件索引列表],
+  "调查报告": [文件索引列表],
+  "专业书籍": [文件索引列表],
+  "政策文件": [文件索引列表],
+  "法规标准": [文件索引列表]
+}}
+文件列表如下：
+{json.dumps([{'index': i, 'name': f['name'], 'path': f['path']} for i, f in enumerate(batch_folders)], ensure_ascii=False, indent=2)}
+"""
+
+                # 优化Ollama性能的连接设置
+                connector = aiohttp.TCPConnector(
+                    limit=5,  # 减少并发连接数
+                    limit_per_host=5,
+                    keepalive_timeout=600,
+                    enable_cleanup_closed=True,
+                    use_dns_cache=True,
+                    ttl_dns_cache=300
+                )
+
+                # 针对Ollama优化的超时设置
+                timeout = aiohttp.ClientTimeout(
+                    total=1800,      # 30分钟总超时
+                    connect=60,      # 1分钟连接超时
+                    sock_read=1200   # 20分钟读取超时，给模型充足处理时间
+                )
+
+                async with aiohttp.ClientSession(connector=connector, timeout=timeout) as session:
+                    # 优化Ollama性能的payload设置 - 启用流式处理
+                    payload = {
+                        "model": ollama_model,
+                        "messages": [
+                            {"role": "system", "content": "你是一个文件分类专家，只能用五个类别分类。请严格按照JSON格式返回结果，不要添加额外说明。"},
+                            {"role": "user", "content": prompt}
+                        ],
+                        "stream": True,  # 启用流式处理
+                        "options": {
+                            "temperature": 0.1,      # 降低随机性，提高一致性和速度
+                            "top_p": 0.8,           # 减少候选token，提高速度
+                            "top_k": 20,            # 限制候选数量，提高速度
+                            "repeat_penalty": 1.1,  # 避免重复，提高效率
+                            "num_predict": -1,      # 不限制输出长度，保证完整分析
+                            "num_ctx": 4096,        # 设置合适的上下文长度
+                            "num_thread": -1,       # 使用所有可用CPU线程
+                            "num_gpu": -1,          # 使用所有可用GPU
+                            "low_vram": False       # 如果显存充足，不启用低显存模式
+                        }
+                    }
+
+                    logger.info(f"Sending streaming batch request to Ollama: {ollama_base_url}/api/chat")
+
+                    try:
+                        async with session.post(
+                            f"{ollama_base_url}/api/chat",
+                            json=payload,
+                            headers={'Content-Type': 'application/json'}
+                        ) as response:
+                            logger.info(f"Ollama streaming batch response status: {response.status}")
+
+                            if response.status != 200:
+                                response_text = await response.text()
+                                logger.error(f"Ollama API error response: {response_text}")
+                                raise Exception(f"Ollama API request failed with status {response.status}: {response_text}")
+
+                            # 异步流式处理响应
+                            model_response = ""
+                            chunk_count = 0
+
+                            async for line in response.content:
+                                if line:
+                                    try:
+                                        line_str = line.decode('utf-8').strip()
+                                        if line_str:
+                                            # 解析每个流式响应块
+                                            chunk_data = json.loads(line_str)
+                                            if "message" in chunk_data and "content" in chunk_data["message"]:
+                                                content_chunk = chunk_data["message"]["content"]
+                                                model_response += content_chunk
+                                                chunk_count += 1
+
+                                                # 每收到10个chunk记录一次进度
+                                                if chunk_count % 10 == 0:
+                                                    logger.debug(f"Batch {batch_start//batch_size + 1} received {chunk_count} chunks, current length: {len(model_response)}")
+
+                                            # 检查是否完成
+                                            if chunk_data.get("done", False):
+                                                logger.info(f"Batch {batch_start//batch_size + 1} streaming completed, total chunks: {chunk_count}, final length: {len(model_response)}")
+                                                break
+
+                                    except json.JSONDecodeError:
+                                        # 跳过无效的JSON行
+                                        continue
+                                    except Exception as parse_error:
+                                        logger.warning(f"Error parsing stream chunk: {parse_error}")
+                                        continue
+
+                    except asyncio.TimeoutError:
+                        logger.error(f"Ollama streaming batch request timed out for batch {batch_start//batch_size + 1}")
+                        raise Exception(f"Ollama batch request timed out")
+                    except aiohttp.ClientError as client_error:
+                        logger.error(f"Ollama client error in batch {batch_start//batch_size + 1}: {client_error}")
+                        raise Exception(f"Ollama client error: {client_error}")
+                    except Exception as req_error:
+                        logger.error(f"Ollama request error in batch {batch_start//batch_size + 1}: {req_error}")
+                        raise
+
+                # 解析批次响应
+                if not model_response.strip():
+                    logger.warning(f"Empty response from Ollama for batch {batch_start//batch_size + 1}")
+                    continue
+
+                # 更强健的JSON提取
+                json_match = re.search(r'```json\s*([\s\S]*?)\s*```', model_response)
+                if json_match:
+                    json_str = json_match.group(1)
+                else:
+                    # 尝试提取大括号内容
+                    json_match = re.search(r'\{[\s\S]*\}', model_response)
+                    if json_match:
+                        json_str = json_match.group(0)
+                    else:
+                        json_str = model_response.strip()
+
+                logger.info(f"Batch {batch_start//batch_size + 1} extracted JSON string length: {len(json_str)}")
+
+                try:
+                    batch_category_indices = json.loads(json_str)
+                    logger.info(f"Batch {batch_start//batch_size + 1} successfully parsed categories")
+                except json.JSONDecodeError as json_error:
+                    logger.error(f"Batch {batch_start//batch_size + 1} JSON parsing failed: {json_error}")
+                    # 尝试修正JSON格式
+                    try:
+                        # 清理可能的格式问题
+                        cleaned_json = re.sub(r'[^\{\}\[\]\,\:\"\d\s\w\.\-\_\u4e00-\u9fa5]', '', json_str)
+                        batch_category_indices = json.loads(cleaned_json)
+                        logger.info(f"Batch {batch_start//batch_size + 1} successfully parsed cleaned JSON")
+                    except:
+                        logger.error(f"Batch {batch_start//batch_size + 1} failed to parse even cleaned JSON, skipping batch")
+                        continue
+
+                # 将批次结果合并到总结果中
+                fixed_categories = ["学术论文", "调查报告", "专业书籍", "政策文件", "法规标准"]
+
+                for cat in fixed_categories:
+                    indices = batch_category_indices.get(cat, [])
+                    for idx in indices:
+                        try:
+                            idx_int = int(idx)
+                            if 0 <= idx_int < len(batch_folders):
+                                all_categories[cat].append(batch_folders[idx_int])
+                        except (ValueError, TypeError):
+                            continue
+
+                logger.info(f"Batch {batch_start//batch_size + 1} completed, processed {len(batch_folders)} files")
+
+                # 添加批次间的短暂延迟，避免过载Ollama
+                if batch_end < len(sample_folders):
+                    await asyncio.sleep(1)
+
+            # 统计最终结果
+            total_assigned = sum(len(files) for files in all_categories.values())
+            logger.info(f"Ollama analysis completed successfully, processed {len(sample_folders)} files in {(len(sample_folders) + batch_size - 1)//batch_size} batches, assigned {total_assigned} files")
+
+            return all_categories
+
+        except Exception as e:
+            logger.error(f"Error in Ollama analysis: {e}", exc_info=True)
+            raise
+
+    @staticmethod
     async def _analyze_with_deepseek(folder_info: List[Dict]) -> Dict[str, List[Dict]]:
-        """使用DeepSeek大模型分析文件夹并生成五大固定分类"""
+        """使用DeepSeek大模型分析文件夹并生成五大固定分类，优先使用Ollama本地模型"""
+        # 首先尝试使用Ollama本地模型
+        try:
+            logger.info("Attempting to use Ollama local model for analysis")
+            return await ResourceService._analyze_with_ollama(folder_info)
+        except Exception as ollama_error:
+            logger.warning(f"Ollama analysis failed: {ollama_error}, falling back to DeepSeek API")
+
+        # 如果Ollama失败，则使用DeepSeek API
         try:
             api_key = config.DEEPSEEK_API_KEY
             if not api_key:
@@ -630,6 +842,7 @@ class ResourceService:
                         categories[cat].append(sample_folders[idx_int])
                         assigned_indices.add(idx_int)
             # 只保留五大类中被分配的文件，未分配的文件直接丢弃
+            logger.info("DeepSeek API analysis completed successfully")
             return categories
         except Exception as e:
             logger.error(f"Error in DeepSeek analysis: {e}", exc_info=True)
