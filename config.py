@@ -81,6 +81,16 @@ class Config:
     def DEEPSEEK_API_KEY(self) -> str:
         """DeepSeek API密钥"""
         return os.environ.get('DEEPSEEK_API_KEY', '')
+
+    @property
+    def OLLAMA_BASE_URL(self) -> str:
+        """Ollama服务器地址"""
+        return os.environ.get('OLLAMA_BASE_URL', 'http://localhost:11434')
+
+    @property
+    def OLLAMA_MODEL(self) -> str:
+        """Ollama模型名称"""
+        return os.environ.get('OLLAMA_MODEL', 'deepseek-r1:8b')
     
     # 服务器配置
     @property
@@ -132,3 +142,5 @@ BASE_PDF_DIRS = config.BASE_PDF_DIRS
 MONITOR_DIRS = config.MONITOR_DIRS
 DATABASE_URI = config.DATABASE_URI
 DEEPSEEK_API_KEY = config.DEEPSEEK_API_KEY
+OLLAMA_BASE_URL = config.OLLAMA_BASE_URL
+OLLAMA_MODEL = config.OLLAMA_MODEL
