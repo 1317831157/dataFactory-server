@@ -226,31 +226,12 @@ class MyModel(Document):
 - WARNING: 警告信息
 - ERROR: 错误信息
 
-## 🧪 测试
-
-### 运行测试
-
-```bash
-# 运行所有测试
-python -m pytest tests/ -v
-
-# 运行特定测试
-python -m pytest tests/test_stop_crawling.py -v
-```
-
 ### 手动测试
 
 ```bash
 # 测试API接口
-curl -X GET http://localhost:8001/api/collection/statistics
+curl -v http://localhost:8001/output
 
-# 停止爬取任务
-curl -X POST http://localhost:8001/api/collection/crawl/stop
-
-# 开始数据分析
-curl -X POST http://localhost:8001/api/collection/crawl \
-  -H "Content-Type: application/json" \
-  -d '{"sourceType": "academic", "limit": 100}'
 ```
 
 ## 📊 监控和日志
