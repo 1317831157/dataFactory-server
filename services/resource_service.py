@@ -444,7 +444,6 @@ class ResourceService:
                 task_obj.progress = 30
                 task_obj.status = 'analyzing'
 
-            # 2. LLM 分类（失败则本地规则）
             try:
                 file_dicts = [{'name': os.path.basename(f), 'path': f} for f in all_files]
                 categories = await ResourceService._analyze_with_deepseek(file_dicts)

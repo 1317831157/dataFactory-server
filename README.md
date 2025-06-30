@@ -40,7 +40,7 @@ MONGO_HOST=localhost
 MONGO_PORT=27017
 DB_NAME=data_factory
 
-
+#分类二选一,先尝试使用Ollama本地模型，失败调用DeepSeek在线api
 # Ollama 本地大模型配置(根据实际修改)
 OLLAMA_BASE_URL=http://localhost:11434
 OLLAMA_MODEL=deepseek-r1:8b
@@ -155,6 +155,8 @@ await init_db()
 
 # 清理数据库
 python clear/clear_database.py
+# 或
+python clear/clear_database_force.py
 ```
 
 ## 🔌 API 文档
@@ -184,48 +186,6 @@ python clear/clear_database.py
 - `404`: 资源不存在
 - `500`: 服务器内部错误
 
-### 添加新的服务
-
-1. 在 `services/` 目录下创建服务文件
-2. 实现业务逻辑类
-3. 在需要的地方导入使用
-
-### 数据库模型
-
-使用 Beanie ODM 定义数据模型：
-
-```python
-from beanie import Document
-from pydantic import Field
-
-class MyModel(Document):
-    name: str = Field(..., description="名称")
-
-    class Settings:
-        name = "my_collection"
-```
-
-## 🔧 配置说明
-
-### 环境变量
-
-| 变量名           | 说明         | 默认值    |
-| ---------------- | ------------ | --------- |
-| BASE_PDF_DIR     | PDF 扫描目录 | -         |
-| MONGO_HOST       | MongoDB 主机 | localhost |
-| MONGO_PORT       | MongoDB 端口 | 27017     |
-| DEEPSEEK_API_KEY | AI API 密钥  | -         |
-| SERVER_PORT      | 服务端口     | 8001      |
-
-### 日志配置
-
-日志级别可通过 `LOG_LEVEL` 环境变量配置：
-
-- DEBUG: 详细调试信息
-- INFO: 一般信息 (默认)
-- WARNING: 警告信息
-- ERROR: 错误信息
-
 ### 手动测试
 
 ```bash
@@ -233,24 +193,6 @@ class MyModel(Document):
 curl -v http://localhost:8001/output
 
 ```
-
-## 📊 监控和日志
-
-### 日志文件
-
-日志输出到控制台，包含：
-
-- 请求日志
-- 错误日志
-- 业务操作日志
-
-### 性能监控
-
-- 任务执行时间
-- 数据库查询性能
-- 内存使用情况
-
-## 🚨 故障排除
 
 ### 常见问题
 
